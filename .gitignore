@@ -18,3 +18,7 @@ build/
 *.swo
 output copy/
 data/
+# API keys
+.env.local
+secrets/
+*.key
