@@ -159,6 +159,7 @@ class AegisQuantLabGUI:
         ctk.CTkLabel(right, text="REAL-TIME LOG", font=("Helvetica", 14, "bold")).pack(pady=(10, 5))
         self.log_text = ctk.CTkTextbox(right, font=("Consolas", 11), wrap="word")
         self.log_text.pack(fill="both", expand=True, padx=5, pady=5)
+        self._enable_text_copy(self.log_text)
 
     def _build_tk_layout(self):
         """Fallback pure-tkinter layout."""
@@ -229,10 +230,44 @@ class AegisQuantLabGUI:
         self.log_text = st.ScrolledText(right, bg="#0a0a23", fg="#00ff41",
                                         font=("Consolas", 10), insertbackground="white")
         self.log_text.pack(fill="both", expand=True, padx=5, pady=5)
+        self._enable_text_copy(self.log_text)
 
     # ──────────────────────────────────────────
     # Helpers
     # ──────────────────────────────────────────
+
+    @staticmethod
+    def _enable_text_copy(widget):
+        """Enable Ctrl+C / Ctrl+A copy and right-click context menu on a text widget."""
+        import tkinter as tk
+
+        # ── Keyboard shortcuts ──
+        def copy_selection(event=None):
+            try:
+                text = widget.selection_get()
+                widget.clipboard_clear()
+                widget.clipboard_append(text)
+            except tk.TclError:
+                pass  # no selection
+            return "break"
+
+        def select_all(event=None):
+            widget.tag_add("sel", "1.0", "end")
+            return "break"
+
+        widget.bind("<Control-c>", copy_selection)
+        widget.bind("<Control-C>", copy_selection)
+        widget.bind("<Control-a>", select_all)
+        widget.bind("<Control-A>", select_all)
+
+        # ── Right-click context menu ──
+        menu = tk.Menu(widget, tearoff=0)
+        menu.add_command(label="Copy", command=copy_selection, accelerator="Ctrl+C")
+
+        def show_context_menu(event):
+            menu.tk_popup(event.x_root, event.y_root)
+
+        widget.bind("<Button-3>", show_context_menu)  # right-click
 
     def _select_all(self):
         for var in self.asset_vars.values():
