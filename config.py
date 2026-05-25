@@ -99,3 +99,39 @@ RISK_PER_TRADE_PCT: float = 0.01            # 1% risk per trade
 RISK_REWARD_RATIO: float = 2.0              # 1:2 risk/reward
 MAX_CONCURRENT_TRADES: int = 5              # max simultaneous positions
 MAX_DAILY_LOSS_PCT: float = 0.05            # 5% daily loss limit
+
+# ──────────────────────────────────────────────
+# v3.0 — Adaptive Scoring Engine Parameters
+# ──────────────────────────────────────────────
+SCORING_ENTRY_THRESHOLD: float = 0.65       # min weighted score for entry (0.5=aggro, 0.8=conserv)
+SCORING_CHAOS_THRESHOLD: float = 0.45       # max opposing score ratio before chaos block
+SCORING_TOP_N: int = 15                     # number of top indicators used in scoring
+
+# ──────────────────────────────────────────────
+# v3.0 — Breakeven & Trailing Stop
+# ──────────────────────────────────────────────
+BREAKEVEN_TRIGGER_PCT: float = 0.015        # +1.5% unrealized → move SL to breakeven
+TRAILING_TRIGGER_PCT: float = 0.030         # +3.0% unrealized → activate trailing stop
+TRAILING_DISTANCE_PCT: float = 0.015        # trail 1.5% behind highest/lowest
+
+# ──────────────────────────────────────────────
+# v3.0 — Compound Interest
+# ──────────────────────────────────────────────
+COMPOUND_ENABLED: bool = True               # enable dynamic position sizing
+COMPOUND_RISK_NORMAL: float = 0.01          # 1% risk normally
+COMPOUND_RISK_REDUCED: float = 0.005        # 0.5% risk after loss streak
+COMPOUND_LOSS_STREAK_THRESHOLD: int = 3     # reduce risk after N consecutive losses
+COMPOUND_MAX_RISK: float = 0.02             # hard cap: never risk more than 2%
+
+# ──────────────────────────────────────────────
+# v3.0 — Cluster Guard
+# ──────────────────────────────────────────────
+CLUSTER_CORRELATION_BLOCK: float = 0.75     # block if corr > this
+CLUSTER_MAX_PER_GROUP: int = 2              # max positions in same cluster
+
+# ──────────────────────────────────────────────
+# v3.0 — Bybit Demo API
+# ──────────────────────────────────────────────
+BYBIT_DEMO_ENDPOINT: str = "https://api-demo.bybit.com"
+BYBIT_DEMO_API_KEY: str = ""                # set via environment variable
+BYBIT_DEMO_API_SECRET: str = ""             # set via environment variable
