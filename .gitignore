@@ -16,3 +16,5 @@ build/
 .vscode/
 *.swp
 *.swo
+output copy/
+data/
