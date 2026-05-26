@@ -447,7 +447,7 @@ class BreakevenManager:
     BREAKEVEN_TRIGGER: float = 0.015     # +1.5% triggers breakeven SL move
     TRAILING_TRIGGER: float = 0.030      # +3.0% activates trailing
     TRAILING_DISTANCE: float = 0.015     # trail 1.5% behind highest point
-    FEE_BUFFER: float = 0.0011           # Bybit roundtrip fee (cover costs at BE)
+    FEE_BUFFER: float = 0.0004           # Bybit roundtrip fee for LIMIT orders (maker)
 
     def __init__(self):
         pass
@@ -812,6 +812,17 @@ class ClusterGuard:
         """
         sym_clean = symbol.replace("/", "").replace("USDT", "") + "USDT"
 
+        # Check 0: ANTI-PYRAMID — block re-entry into same symbol
+        for p in open_positions:
+            if p.state == PositionState.CLOSED:
+                continue
+            p_clean = p.symbol.replace("/", "").replace("USDT", "") + "USDT"
+            if p_clean == sym_clean:
+                return False, (
+                    f"ANTI-PYRAMID: {symbol} already has an open position "
+                    f"({p.direction.value} since {p.entry_time.strftime('%H:%M')})"
+                )
+
         # Check 1: Max concurrent positions
         active = [p for p in open_positions if p.state != PositionState.CLOSED]
         if len(active) >= config.MAX_CONCURRENT_TRADES:
@@ -961,16 +972,33 @@ class BybitDemoConnector:
             logger.error(f"Failed to fetch klines for {symbol}: {e}")
             return None
 
+    def get_instrument_info(self, symbol: str) -> dict | None:
+        """Get instrument info including lot_size precision for proper qty rounding."""
+        if not self._connected:
+            return None
+        try:
+            result = self.session.get_instruments_info(
+                category="linear",
+                symbol=symbol.replace("/", ""),
+            )
+            if result.get("retCode") == 0 and result["result"]["list"]:
+                return result["result"]["list"][0]
+            return None
+        except Exception as e:
+            logger.debug(f"Failed to get instrument info for {symbol}: {e}")
+            return None
+
     def place_order(
         self,
         symbol: str,
         side: str,         # "Buy" or "Sell"
         qty: float,
-        order_type: str = "Market",
+        order_type: str = "Limit",
+        price: float | None = None,
         stop_loss: float | None = None,
         take_profit: float | None = None,
     ) -> dict | None:
-        """Place an order on Bybit Demo."""
+        """Place an order on Bybit Demo. Defaults to Limit for lower fees."""
         if not self._connected:
             return None
 
@@ -982,6 +1010,10 @@ class BybitDemoConnector:
                 "orderType": order_type,
                 "qty": str(qty),
             }
+            # Limit orders require a price; for time_in_force use PostOnly for maker
+            if order_type == "Limit" and price is not None:
+                params["price"] = str(price)
+                params["timeInForce"] = "PostOnly"  # Ensure maker fee only
             if stop_loss:
                 params["stopLoss"] = str(round(stop_loss, 6))
             if take_profit:
@@ -989,14 +1021,49 @@ class BybitDemoConnector:
 
             result = self.session.place_order(**params)
             if result.get("retCode") == 0:
-                logger.info(f"  📋 Order placed: {side} {qty} {symbol}")
-                return result["result"]
+                order_data = result["result"]
+                logger.info(
+                    f"  📋 Order placed: {order_type} {side} {qty} {symbol} "
+                    f"| orderId={order_data.get('orderId', 'N/A')}"
+                )
+                return order_data
             else:
                 logger.error(f"Order failed: {result}")
+                # Fallback to Market if Limit PostOnly rejected
+                if order_type == "Limit":
+                    logger.info(f"  ↻ Fallback to Market order for {symbol}")
+                    params["orderType"] = "Market"
+                    params.pop("price", None)
+                    params.pop("timeInForce", None)
+                    result = self.session.place_order(**params)
+                    if result.get("retCode") == 0:
+                        order_data = result["result"]
+                        logger.info(f"  📋 Market fallback OK: {side} {qty} {symbol}")
+                        return order_data
+                    logger.error(f"Market fallback also failed: {result}")
                 return None
 
         except Exception as e:
             logger.error(f"Order placement error: {e}")
+            return None
+
+    def get_order_detail(self, symbol: str, order_id: str) -> dict | None:
+        """Get order execution detail to retrieve real fill price (avgPrice)."""
+        if not self._connected or not order_id:
+            return None
+        try:
+            # Wait briefly for fill
+            time.sleep(0.5)
+            result = self.session.get_order_history(
+                category="linear",
+                symbol=symbol.replace("/", ""),
+                orderId=order_id,
+            )
+            if result.get("retCode") == 0 and result["result"]["list"]:
+                return result["result"]["list"][0]
+            return None
+        except Exception as e:
+            logger.debug(f"Failed to get order detail: {e}")
             return None
 
     def close_position(self, symbol: str, side: str, qty: float) -> dict | None:
