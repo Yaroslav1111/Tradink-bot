@@ -23,10 +23,10 @@ os.makedirs(LOG_DIR, exist_ok=True)
 DEFAULT_SYMBOLS: list[str] = [
     "BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT", "XRP/USDT",
     "DOGE/USDT", "ADA/USDT", "AVAX/USDT", "DOT/USDT", "LINK/USDT",
-    "MATIC/USDT", "TON/USDT", "TRX/USDT", "SHIB/USDT", "UNI/USDT",
+    "MATIC/USDT", "TON/USDT", "TRX/USDT", "1000SHIB/USDT", "UNI/USDT",
     "ATOM/USDT", "LTC/USDT", "BCH/USDT", "NEAR/USDT", "APT/USDT",
     "FIL/USDT", "ARB/USDT", "OP/USDT", "SUI/USDT", "HYPE/USDT",
-    "IMX/USDT", "PEPE/USDT", "WIF/USDT", "FET/USDT", "RENDER/USDT",
+    "IMX/USDT", "1000PEPE/USDT", "WIF/USDT", "FET/USDT", "RENDER/USDT",
     "INJ/USDT", "SEI/USDT", "STX/USDT", "AAVE/USDT", "MKR/USDT",
     "RUNE/USDT", "TIA/USDT", "ALGO/USDT", "FTM/USDT", "SAND/USDT",
     "MANA/USDT", "GALA/USDT", "EOS/USDT", "XLM/USDT", "IOTA/USDT",
@@ -50,12 +50,14 @@ BYBIT_MAX_RETRIES: int = 5
 # ──────────────────────────────────────────────
 # Simulation — Realistic Bybit costs (VIP 0)
 # Official: Maker 0.020%, Taker 0.055%
-# Worst case: Taker on entry + Taker on exit
 # ──────────────────────────────────────────────
 FEE_RATE: float = 0.00055         # 0.055 % taker fee (per side) — Bybit VIP 0
+MAKER_FEE_RATE: float = 0.0002    # 0.020 % maker fee (per side) — Bybit VIP 0
 SLIPPAGE: float = 0.0000          # slippage embedded into taker fee model
 TOTAL_COST_PER_SIDE: float = FEE_RATE + SLIPPAGE   # 0.055 % per side
 ROUNDTRIP_FEE: float = 0.0011     # 0.11% total (entry taker + exit taker)
+ROUNDTRIP_FEE_LIMIT: float = 0.0004  # 0.04% total (entry maker + exit maker)
+USE_LIMIT_ORDERS: bool = True     # True = Limit (maker), False = Market (taker)
 
 # ──────────────────────────────────────────────
 # Walk-Forward Analysis

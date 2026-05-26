@@ -29,6 +29,7 @@ from aegis_live_engine import (
     PositionState,
     ScoringResult,
 )
+from trade_diagnostics import TradeDiagnostics
 
 
 def test_scoring_engine():
@@ -358,7 +359,15 @@ def test_cluster_guard():
     print(f"\n  BTC with 5 positions open: Allowed={allowed4}")
     print(f"    Reason: {reason4}")
     assert not allowed4
-    print("    ✅ Max concurrent protection working")
+    print("    \u2705 Max concurrent protection working")
+
+    # Test: ANTI-PYRAMID -- same symbol re-entry MUST be blocked
+    allowed5, reason5 = guard.check_entry_allowed("SAND/USDT", [sand_pos])
+    print(f"\n  SAND re-entry with SAND already open: Allowed={allowed5}")
+    print(f"    Reason: {reason5}")
+    assert not allowed5
+    assert "ANTI-PYRAMID" in reason5
+    print("    \u2705 ANTI-PYRAMID protection working")
 
 
 def test_full_engine_initialization():
@@ -387,8 +396,70 @@ def test_full_engine_initialization():
         print("  (Run generate_weight_matrix.py first to create weights)")
 
 
+def test_trade_diagnostics():
+    """Test 6: Trade Diagnostics Module."""
+    print("\n" + "\u2500" * 60)
+    print("  TEST 6: Trade Diagnostics")
+    print("\u2500" * 60)
+
+    import numpy as np
+    import pandas as pd
+
+    diag = TradeDiagnostics(log_dir="/tmp/aegis_test_logs")
+
+    # Test 1: Trend exhaustion detection
+    print("\n  Trend exhaustion test:")
+    # Create 10 consecutive up candles
+    up_df = pd.DataFrame({
+        "close": [100 + i for i in range(15)],
+        "high": [101 + i for i in range(15)],
+        "low": [99 + i for i in range(15)],
+        "volume": [1000] * 15,
+    })
+    exhausted, count = diag.check_trend_exhaustion(up_df, "LONG")
+    print(f"    10+ consecutive up candles, LONG entry: exhausted={exhausted}, count={count}")
+    assert exhausted
+    assert count >= 7
+    print("    \u2705 Trend exhaustion detection working")
+
+    # Not exhausted for SHORT direction
+    exhausted2, count2 = diag.check_trend_exhaustion(up_df, "SHORT")
+    print(f"    Same data, SHORT entry: exhausted={exhausted2}, count={count2}")
+    assert not exhausted2
+    print("    \u2705 Correct direction-awareness")
+
+    # Test 2: Late entry detection
+    print("\n  Late entry test:")
+    is_late1, move1 = diag.check_late_entry("TESTUSDT", 100.0)
+    assert not is_late1  # First call, records price
+    print(f"    First signal: late={is_late1}, move={move1:.4f}")
+
+    is_late2, move2 = diag.check_late_entry("TESTUSDT", 101.0)  # 1% move > 0.8%
+    print(f"    After 1% move: late={is_late2}, move={move2:.4f}")
+    assert is_late2
+    print("    \u2705 Late entry detection working")
+
+    # Test 3: Logging
+    diag.log_entry_decision(
+        "BTCUSDT", "ENTRY", "Test entry",
+        score=0.72, direction="LONG", price=67000.0,
+    )
+    diag.log_entry_decision(
+        "ETHUSDT", "BLOCK", "Anti-pyramid",
+        score=0.55, direction="SHORT", price=3500.0,
+    )
+    summary = diag.get_summary()
+    print(f"\n  Diagnostics summary: {summary}")
+    assert summary["total_decisions"] >= 2
+    print("    \u2705 Diagnostics logging working")
+
+    # Test 4: Fill analysis
+    diag.log_fill_analysis("BTCUSDT", 67000.0, 66990.0, "LONG")
+    print("    \u2705 Fill analysis logging working")
+
+
 def test_confidence_mapping():
-    """Test 6: Confidence Score Mapping (the intelligence layer)."""
+    """Test 7: Confidence Score Mapping (the intelligence layer)."""
     print("\n" + "─" * 60)
     print("  TEST 6: Confidence Score Mapping")
     print("─" * 60)
@@ -437,6 +508,7 @@ if __name__ == "__main__":
         test_breakeven_manager()
         test_compound_calculator()
         test_cluster_guard()
+        test_trade_diagnostics()
         test_confidence_mapping()
         test_full_engine_initialization()
 

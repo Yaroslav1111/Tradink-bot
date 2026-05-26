@@ -55,6 +55,7 @@ import signal
 import sys
 import time
 import traceback
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 
@@ -78,11 +79,13 @@ from aegis_live_engine import (
     ScoringResult,
 )
 from generate_weight_matrix import _compute_indicator_signals
-import os
-from dotenv import load_dotenv
+from trade_diagnostics import TradeDiagnostics
 
-# Загружаем ключи из .env.local
-load_dotenv(".env.local")
+try:
+    from dotenv import load_dotenv
+    load_dotenv(".env.local")
+except ImportError:
+    pass  # dotenv not installed, use env vars directly
 
 # ══════════════════════════════════════════════════════════════════
 # LOGGING SETUP
@@ -152,10 +155,10 @@ class LiveBot:
     DEFAULT_SYMBOLS = [
         "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT",
         "DOGEUSDT", "ADAUSDT", "AVAXUSDT", "DOTUSDT", "LINKUSDT",
-        "MATICUSDT", "TONUSDT", "TRXUSDT", "SHIBUSDT", "UNIUSDT",
+        "MATICUSDT", "TONUSDT", "TRXUSDT", "1000SHIBUSDT", "UNIUSDT",
         "ATOMUSDT", "LTCUSDT", "BCHUSDT", "NEARUSDT", "APTUSDT",
         "FILUSDT", "ARBUSDT", "OPUSDT", "SUIUSDT", "HYPEUSDT",
-        "IMXUSDT", "PEPEUSDT", "WIFUSDT", "FETUSDT", "RENDERUSDT",
+        "IMXUSDT", "1000PEPEUSDT", "WIFUSDT", "FETUSDT", "RENDERUSDT",
         "INJUSDT", "SEIUSDT", "STXUSDT", "AAVEUSDT", "MKRUSDT",
         "RUNEUSDT", "TIAUSDT", "ALGOUSDT", "FTMUSDT", "SANDUSDT",
         "MANAUSDT", "GALAUSDT", "EOSUSDT", "XLMUSDT", "IOTAUSDT",
@@ -183,6 +186,8 @@ class LiveBot:
         self.total_signals_checked = 0
         self.total_orders_placed = 0
         self.start_time = datetime.now(timezone.utc)
+        self.diagnostics = TradeDiagnostics()
+        self._instrument_cache: dict[str, dict] = {}  # cache lot_size info
 
         # ── Initialize components ──
         self.logger.info("=" * 70)
@@ -288,6 +293,69 @@ class LiveBot:
         except Exception as e:
             self.logger.debug(f"    Failed to fetch {symbol}: {e}")
             return None
+
+    def _fetch_all_candles_parallel(self, limit: int = 200) -> dict[str, pd.DataFrame]:
+        """
+        Fetch candles for ALL symbols in parallel using ThreadPoolExecutor.
+        This reduces scan time from 60+ seconds to ~5-10 seconds.
+        """
+        results: dict[str, pd.DataFrame] = {}
+
+        def _fetch_one(sym: str):
+            try:
+                return sym, self._fetch_candles(sym, limit=limit)
+            except Exception:
+                return sym, None
+
+        with ThreadPoolExecutor(max_workers=10) as executor:
+            futures = {executor.submit(_fetch_one, s): s for s in self.symbols}
+            for future in as_completed(futures):
+                try:
+                    sym, df = future.result(timeout=15)
+                    if df is not None and len(df) >= 100:
+                        results[sym] = df
+                except Exception:
+                    pass
+
+        return results
+
+    def _get_lot_size_precision(self, symbol: str, current_price: float) -> int:
+        """
+        Get the proper decimal precision for quantity from Bybit instrument info.
+        Falls back to price-based heuristic if API call fails.
+        """
+        # Check cache first
+        if symbol in self._instrument_cache:
+            info = self._instrument_cache[symbol]
+        else:
+            info = self.connector.get_instrument_info(symbol)
+            if info:
+                self._instrument_cache[symbol] = info
+
+        if info:
+            try:
+                lot_filter = info.get("lotSizeFilter", {})
+                qty_step = lot_filter.get("qtyStep", "1")
+                # Count decimal places in qtyStep
+                if "." in qty_step:
+                    decimals = len(qty_step.rstrip("0").split(".")[1])
+                else:
+                    decimals = 0
+                return decimals
+            except Exception:
+                pass
+
+        # Fallback: price-based heuristic
+        if current_price > 10000:
+            return 3
+        elif current_price > 100:
+            return 2
+        elif current_price > 1:
+            return 1
+        elif current_price > 0.01:
+            return 0
+        else:
+            return 0
 
     # ──────────────────────────────────────────────
     # ANALYSIS — Compute indicators + scoring
@@ -421,25 +489,41 @@ class LiveBot:
         Execute a trade entry on Bybit Demo.
 
         Steps:
-          1. ClusterGuard approval
-          2. CompoundCalculator position size
-          3. Calculate SL/TP using ATR
-          4. Place market order with SL/TP
-          5. Register position in engine
+          1. Diagnostics pre-entry checks (exhaustion, decay, momentum)
+          2. ClusterGuard approval (includes anti-pyramid)
+          3. CompoundCalculator position size
+          4. Calculate SL/TP using ATR
+          5. Place LIMIT order with SL/TP (lower fees)
+          6. Get real fill price from exchange
+          7. Register position in engine
         """
         direction = scoring.direction
         if direction is None:
             return None
 
-        # ── Step 1: Cluster Guard ──
+        dir_str = direction.value
+
+        # -- Step 1: Diagnostic pre-entry checks --
+        diag_ok, diag_reason = self.diagnostics.run_pre_entry_checks(
+            symbol, dir_str, df, current_price,
+        )
+        if not diag_ok:
+            self.logger.info(f"  >>> {symbol} BLOCKED by diagnostics: {diag_reason}")
+            return None
+
+        # -- Step 2: Cluster Guard (includes ANTI-PYRAMID) --
         allowed, reason = self.engine.cluster_guard.check_entry_allowed(
             symbol, self.engine.open_positions
         )
         if not allowed:
-            self.logger.info(f"  🛡️  {symbol} BLOCKED by ClusterGuard: {reason}")
+            self.logger.info(f"  >>> {symbol} BLOCKED by ClusterGuard: {reason}")
+            self.diagnostics.log_entry_decision(
+                symbol, "BLOCK", reason,
+                score=scoring.total_score, direction=dir_str, price=current_price,
+            )
             return None
 
-        # ── Step 2: Calculate ATR-based SL/TP ──
+        # -- Step 3: Calculate ATR-based SL/TP --
         import pandas_ta as ta
         atr_series = ta.atr(
             df["high"].astype(float),
@@ -462,12 +546,16 @@ class LiveBot:
             stop_loss = current_price - sl_distance
             take_profit = current_price + tp_distance
             side = "Buy"
+            # Limit price: slightly below current for LONG (to act as maker)
+            limit_price = current_price * 0.9998  # 0.02% below
         else:
             stop_loss = current_price + sl_distance
             take_profit = current_price - tp_distance
             side = "Sell"
+            # Limit price: slightly above current for SHORT (to act as maker)
+            limit_price = current_price * 1.0002  # 0.02% above
 
-        # ── Step 3: Position size (compound) ──
+        # -- Step 4: Position size (compound) --
         size_info = self.engine.compound.calculate_position_size(
             entry_price=current_price,
             stop_loss_price=stop_loss,
@@ -476,60 +564,96 @@ class LiveBot:
 
         quantity = size_info["quantity"]
 
-        # Round quantity to Bybit precision (varies per symbol)
-        # For most USDT perps: 3 decimals for majors, more for altcoins
-        if current_price > 1000:
-            quantity = round(quantity, 3)
-        elif current_price > 10:
-            quantity = round(quantity, 2)
-        elif current_price > 1:
-            quantity = round(quantity, 1)
-        else:
-            quantity = round(quantity, 0)
+        # -- Step 4b: Proper Bybit lot_size precision --
+        precision = self._get_lot_size_precision(symbol, current_price)
+        quantity = round(quantity, precision)
 
         if quantity <= 0:
-            self.logger.warning(f"  ⚠️  {symbol} quantity too small: {quantity}")
+            self.logger.warning(f"  !!! {symbol} quantity too small: {quantity}")
             return None
 
-        # ── Step 4: Place order on Bybit Demo ──
+        # Round limit price to tick size
+        if current_price > 100:
+            limit_price = round(limit_price, 2)
+        elif current_price > 1:
+            limit_price = round(limit_price, 4)
+        else:
+            limit_price = round(limit_price, 6)
+
+        # -- Step 5: Place order on Bybit Demo --
+        use_limit = getattr(config, 'USE_LIMIT_ORDERS', True)
+        order_type = "Limit" if use_limit else "Market"
+
         self.logger.info("")
-        self.logger.info(f"  ╔══════════════════════════════════════════════════════")
-        self.logger.info(f"  ║ 🚀 NEW ENTRY: {direction.value} {symbol}")
-        self.logger.info(f"  ╠──────────────────────────────────────────────────────")
-        self.logger.info(f"  ║ Score:    {scoring.confidence_pct:.1f}% "
+        self.logger.info(f"  ======================================================")
+        self.logger.info(f"   NEW ENTRY: {direction.value} {symbol}")
+        self.logger.info(f"  ------------------------------------------------------")
+        self.logger.info(f"   Score:    {scoring.confidence_pct:.1f}% "
                          f"({scoring.n_indicators_firing} indicators)")
-        self.logger.info(f"  ║ Price:    {current_price:.6f}")
-        self.logger.info(f"  ║ Qty:      {quantity}")
-        self.logger.info(f"  ║ Risk:     ${size_info['risk_usdt']:.2f} "
+        self.logger.info(f"   Price:    {current_price:.6f} (limit: {limit_price:.6f})")
+        self.logger.info(f"   Qty:      {quantity} (precision: {precision} decimals)")
+        self.logger.info(f"   Risk:     ${size_info['risk_usdt']:.2f} "
                          f"({size_info['risk_pct_used']:.2f}% of balance)")
-        self.logger.info(f"  ║ SL:       {stop_loss:.6f} "
+        self.logger.info(f"   SL:       {stop_loss:.6f} "
                          f"(-{sl_distance/current_price*100:.2f}%)")
-        self.logger.info(f"  ║ TP:       {take_profit:.6f} "
+        self.logger.info(f"   TP:       {take_profit:.6f} "
                          f"(+{tp_distance/current_price*100:.2f}%)")
-        self.logger.info(f"  ║ Leverage: {self.leverage}x")
-        self.logger.info(f"  ║ Balance:  ${self.engine.compound.current_balance:.2f}")
-        self.logger.info(f"  ╚══════════════════════════════════════════════════════")
+        self.logger.info(f"   Order:    {order_type} | Leverage: {self.leverage}x")
+        self.logger.info(f"   Balance:  ${self.engine.compound.current_balance:.2f}")
+        self.logger.info(f"  ======================================================")
 
         order_result = self.connector.place_order(
             symbol=symbol,
             side=side,
             qty=quantity,
-            order_type="Market",
+            order_type=order_type,
+            price=limit_price if use_limit else None,
             stop_loss=stop_loss,
             take_profit=take_profit,
         )
 
         if order_result is None:
-            self.logger.error(f"  ❌ Order FAILED for {symbol}")
+            self.logger.error(f"  !!! Order FAILED for {symbol}")
+            self.diagnostics.log_entry_decision(
+                symbol, "SKIP", "Order placement failed",
+                score=scoring.total_score, direction=dir_str, price=current_price,
+            )
             return None
 
         self.total_orders_placed += 1
 
-        # ── Step 5: Register position in engine ──
+        # -- Step 6: Get real fill price from exchange --
+        actual_entry_price = current_price  # default fallback
+        order_id = order_result.get("orderId", "")
+        if order_id:
+            detail = self.connector.get_order_detail(symbol, order_id)
+            if detail:
+                avg_price_str = detail.get("avgPrice", "")
+                if avg_price_str and float(avg_price_str) > 0:
+                    actual_entry_price = float(avg_price_str)
+                    self.logger.info(
+                        f"   Fill price: {actual_entry_price:.6f} "
+                        f"(vs candle close: {current_price:.6f})"
+                    )
+                    # Log fill analysis
+                    self.diagnostics.log_fill_analysis(
+                        symbol, current_price, actual_entry_price, dir_str,
+                    )
+
+        # Recalculate SL/TP based on ACTUAL fill price
+        if actual_entry_price != current_price:
+            if direction == TradeDirection.LONG:
+                stop_loss = actual_entry_price - sl_distance
+                take_profit = actual_entry_price + tp_distance
+            else:
+                stop_loss = actual_entry_price + sl_distance
+                take_profit = actual_entry_price - tp_distance
+
+        # -- Step 7: Register position in engine --
         position = LivePosition(
             symbol=symbol,
             direction=direction,
-            entry_price=current_price,
+            entry_price=actual_entry_price,  # REAL fill price
             entry_time=datetime.now(timezone.utc),
             quantity=quantity,
             risk_usdt=size_info["risk_usdt"],
@@ -541,7 +665,24 @@ class LiveBot:
         )
         self.engine.open_positions.append(position)
 
-        self.logger.info(f"  ✅ Order CONFIRMED — Position registered")
+        # Log successful entry
+        self.diagnostics.log_entry_decision(
+            symbol, "ENTRY",
+            f"Score={scoring.confidence_pct:.1f}% | {scoring.n_indicators_firing} indicators",
+            score=scoring.total_score, direction=dir_str, price=actual_entry_price,
+            extra={
+                "fill_price": actual_entry_price,
+                "candle_close": current_price,
+                "sl": stop_loss,
+                "tp": take_profit,
+                "qty": quantity,
+                "risk_usdt": size_info["risk_usdt"],
+                "order_type": order_type,
+            }
+        )
+        self.diagnostics.clear_signal_price(symbol)
+
+        self.logger.info(f"  >>> Order CONFIRMED -- Position registered")
         return position
 
     # ──────────────────────────────────────────────
@@ -738,22 +879,22 @@ class LiveBot:
                 # ── Phase 2: Monitor existing positions ──
                 self._monitor_positions()
 
-                # ── Phase 3: Scan for new entries ──
-                self.logger.info(f"\n  🔍 Scanning {len(self.symbols)} symbols...")
+                # -- Phase 3: Scan for new entries (PARALLEL) --
+                self.logger.info(f"\n  Scanning {len(self.symbols)} symbols (parallel)...")
 
                 signals_found = 0
                 entries_made = 0
 
-                for i, symbol in enumerate(self.symbols):
-                    # Respect Bybit rate limits
-                    if i > 0 and i % 10 == 0:
-                        time.sleep(0.5)
+                # Fetch all candles in parallel (5-10s instead of 60+s)
+                fetch_start = time.time()
+                all_candles = self._fetch_all_candles_parallel(limit=200)
+                fetch_time = time.time() - fetch_start
+                self.logger.info(
+                    f"  Fetched {len(all_candles)}/{len(self.symbols)} symbols "
+                    f"in {fetch_time:.1f}s"
+                )
 
-                    # Fetch candles
-                    df = self._fetch_candles(symbol, limit=200)
-                    if df is None or len(df) < 100:
-                        continue
-
+                for symbol, df in all_candles.items():
                     self.total_signals_checked += 1
 
                     # Analyze
@@ -762,6 +903,14 @@ class LiveBot:
                         continue
 
                     if not scoring.is_tradeable:
+                        # Log skipped signals for diagnostics
+                        if scoring.total_score > 0.15:  # only log near-misses
+                            self.diagnostics.log_entry_decision(
+                                symbol, "SKIP", scoring.blocked_reason,
+                                score=scoring.total_score,
+                                direction=scoring.direction.value if scoring.direction else "",
+                                price=float(df["close"].iloc[-1]),
+                            )
                         continue
 
                     # Signal found!
@@ -769,32 +918,43 @@ class LiveBot:
                     current_price = float(df["close"].iloc[-1])
 
                     self.logger.info(
-                        f"\n  📡 SIGNAL: {scoring.direction.value} {symbol} "
+                        f"\n  SIGNAL: {scoring.direction.value} {symbol} "
                         f"@ {current_price:.6f} | "
                         f"Score: {scoring.confidence_pct:.1f}% | "
                         f"Indicators: {scoring.n_indicators_firing}"
                     )
 
-                    # Execute entry
+                    # Execute entry (all checks inside)
                     position = self._execute_entry(symbol, scoring, current_price, df)
                     if position:
                         entries_made += 1
 
                     # Don't enter too many at once
-                    if entries_made >= 2:
-                        self.logger.info("  ⚠️  Max 2 entries per cycle — pausing scan")
+                    if entries_made >= 3:
+                        self.logger.info("  Max 3 entries per cycle -- pausing scan")
                         break
 
-                # ── Phase 4: Summary ──
+                # -- Phase 4: Summary --
                 cycle_time = time.time() - cycle_start
                 self.logger.info(
-                    f"\n  ⚡ Cycle #{self.cycle_count} complete in {cycle_time:.1f}s: "
+                    f"\n  Cycle #{self.cycle_count} complete in {cycle_time:.1f}s: "
                     f"{signals_found} signals, {entries_made} entries"
                 )
 
                 # Print dashboard every 4 cycles (every hour on 15m)
                 if self.cycle_count % 4 == 0:
                     self._print_dashboard()
+
+                # Export diagnostics every 8 cycles (every 2 hours)
+                if self.cycle_count % 8 == 0:
+                    try:
+                        self.diagnostics.export_diagnostics()
+                        diag_summary = self.diagnostics.get_summary()
+                        self.logger.info(
+                            f"  Diagnostics: {diag_summary['total_decisions']} decisions logged"
+                        )
+                    except Exception:
+                        pass
 
             except KeyboardInterrupt:
                 break
@@ -808,10 +968,10 @@ class LiveBot:
         self._shutdown()
 
     def _shutdown(self):
-        """Graceful shutdown — log final state."""
-        self.logger.info("\n" + "═" * 70)
-        self.logger.info("  🛑 SHUTTING DOWN")
-        self.logger.info("═" * 70)
+        """Graceful shutdown -- log final state."""
+        self.logger.info("\n" + "=" * 70)
+        self.logger.info("  SHUTTING DOWN")
+        self.logger.info("=" * 70)
         self._print_dashboard()
 
         # Save state to JSON
@@ -820,6 +980,7 @@ class LiveBot:
             "cycles_completed": self.cycle_count,
             "total_orders": self.total_orders_placed,
             "compound_status": self.engine.compound.get_status(),
+            "diagnostics_summary": self.diagnostics.get_summary(),
             "open_positions": [
                 {
                     "symbol": p.symbol,
@@ -840,8 +1001,14 @@ class LiveBot:
         with open(state_path, "w", encoding="utf-8") as f:
             json.dump(state, f, indent=2, default=str)
 
-        self.logger.info(f"  💾 State saved to {state_path}")
-        self.logger.info("  👋 Goodbye! Bot shutdown complete.\n")
+        # Export final diagnostics
+        try:
+            self.diagnostics.export_diagnostics()
+        except Exception:
+            pass
+
+        self.logger.info(f"  State saved to {state_path}")
+        self.logger.info("  Goodbye! Bot shutdown complete.\n")
 
 
 # ══════════════════════════════════════════════════════════════════
