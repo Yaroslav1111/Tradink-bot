@@ -188,6 +188,7 @@ class LiveBot:
         self.start_time = datetime.now(timezone.utc)
         self.diagnostics = TradeDiagnostics()
         self._instrument_cache: dict[str, dict] = {}  # cache lot_size info
+        self._pending_orders: list[dict] = []  # pending limit orders with TTL
 
         # ── Initialize components ──
         self.logger.info("=" * 70)
@@ -486,16 +487,15 @@ class LiveBot:
         df: pd.DataFrame,
     ) -> LivePosition | None:
         """
-        Execute a trade entry on Bybit Demo.
+        Execute a trade entry on Bybit Demo using SMART LIMIT ORDERS.
 
-        Steps:
+        Architecture (v3.2):
           1. Diagnostics pre-entry checks (exhaustion, decay, momentum)
           2. ClusterGuard approval (includes anti-pyramid)
-          3. CompoundCalculator position size
-          4. Calculate SL/TP using ATR
-          5. Place LIMIT order with SL/TP (lower fees)
-          6. Get real fill price from exchange
-          7. Register position in engine
+          3. Calculate SL/TP using ATR
+          4. Calculate OPTIMAL limit price (discount entry)
+          5. Place Limit order with TTL (Time-To-Live)
+          6. Order will be checked on next cycle for fill or expiry
         """
         direction = scoring.direction
         if direction is None:
@@ -542,29 +542,33 @@ class LiveBot:
         sl_distance = atr_value * 2.0
         tp_distance = sl_distance * config.RISK_REWARD_RATIO
 
-        if direction == TradeDirection.LONG:
-            stop_loss = current_price - sl_distance
-            take_profit = current_price + tp_distance
-            side = "Buy"
-            # Limit price: slightly below current for LONG (to act as maker)
-            limit_price = current_price * 0.9998  # 0.02% below
-        else:
-            stop_loss = current_price + sl_distance
-            take_profit = current_price - tp_distance
-            side = "Sell"
-            # Limit price: slightly above current for SHORT (to act as maker)
-            limit_price = current_price * 1.0002  # 0.02% above
+        # -- Step 4: Calculate OPTIMAL limit price with discount --
+        # Instead of entering at market, we enter at a DISCOUNT:
+        # LONG: limit price = current_price - 0.3*ATR (buy on a micro-dip)
+        # SHORT: limit price = current_price + 0.3*ATR (sell on a micro-bounce)
+        discount = atr_value * 0.3
 
-        # -- Step 4: Position size (compound) --
+        if direction == TradeDirection.LONG:
+            limit_price = current_price - discount
+            stop_loss = limit_price - sl_distance
+            take_profit = limit_price + tp_distance
+            side = "Buy"
+        else:
+            limit_price = current_price + discount
+            stop_loss = limit_price + sl_distance
+            take_profit = limit_price - tp_distance
+            side = "Sell"
+
+        # -- Step 5: Position size (compound) --
         size_info = self.engine.compound.calculate_position_size(
-            entry_price=current_price,
+            entry_price=limit_price,
             stop_loss_price=stop_loss,
             leverage=self.leverage,
         )
 
         quantity = size_info["quantity"]
 
-        # -- Step 4b: Proper Bybit lot_size precision --
+        # -- Step 5b: Proper Bybit lot_size precision --
         precision = self._get_lot_size_precision(symbol, current_price)
         quantity = round(quantity, precision)
 
@@ -575,30 +579,35 @@ class LiveBot:
         # Round limit price to tick size
         if current_price > 100:
             limit_price = round(limit_price, 2)
+            stop_loss = round(stop_loss, 2)
+            take_profit = round(take_profit, 2)
         elif current_price > 1:
             limit_price = round(limit_price, 4)
+            stop_loss = round(stop_loss, 4)
+            take_profit = round(take_profit, 4)
         else:
             limit_price = round(limit_price, 6)
+            stop_loss = round(stop_loss, 6)
+            take_profit = round(take_profit, 6)
 
-        # -- Step 5: Place order on Bybit Demo --
-        use_limit = getattr(config, 'USE_LIMIT_ORDERS', True)
-        order_type = "Limit" if use_limit else "Market"
-
+        # -- Step 6: Place LIMIT order --
         self.logger.info("")
         self.logger.info(f"  ======================================================")
-        self.logger.info(f"   NEW ENTRY: {direction.value} {symbol}")
+        self.logger.info(f"   NEW LIMIT ENTRY: {direction.value} {symbol}")
         self.logger.info(f"  ------------------------------------------------------")
         self.logger.info(f"   Score:    {scoring.confidence_pct:.1f}% "
                          f"({scoring.n_indicators_firing} indicators)")
-        self.logger.info(f"   Price:    {current_price:.6f} (limit: {limit_price:.6f})")
+        self.logger.info(f"   Market:   {current_price:.6f}")
+        self.logger.info(f"   Limit:    {limit_price:.6f} "
+                         f"(discount: {discount/current_price*100:.2f}%)")
         self.logger.info(f"   Qty:      {quantity} (precision: {precision} decimals)")
         self.logger.info(f"   Risk:     ${size_info['risk_usdt']:.2f} "
                          f"({size_info['risk_pct_used']:.2f}% of balance)")
         self.logger.info(f"   SL:       {stop_loss:.6f} "
-                         f"(-{sl_distance/current_price*100:.2f}%)")
+                         f"(-{sl_distance/limit_price*100:.2f}%)")
         self.logger.info(f"   TP:       {take_profit:.6f} "
-                         f"(+{tp_distance/current_price*100:.2f}%)")
-        self.logger.info(f"   Order:    {order_type} | Leverage: {self.leverage}x")
+                         f"(+{tp_distance/limit_price*100:.2f}%)")
+        self.logger.info(f"   TTL:      4 minutes (cancel if not filled)")
         self.logger.info(f"   Balance:  ${self.engine.compound.current_balance:.2f}")
         self.logger.info(f"  ======================================================")
 
@@ -606,8 +615,8 @@ class LiveBot:
             symbol=symbol,
             side=side,
             qty=quantity,
-            order_type=order_type,
-            price=limit_price if use_limit else None,
+            order_type="Limit",
+            price=limit_price,
             stop_loss=stop_loss,
             take_profit=take_profit,
         )
@@ -621,69 +630,227 @@ class LiveBot:
             return None
 
         self.total_orders_placed += 1
-
-        # -- Step 6: Get real fill price from exchange --
-        actual_entry_price = current_price  # default fallback
         order_id = order_result.get("orderId", "")
-        if order_id:
-            detail = self.connector.get_order_detail(symbol, order_id)
-            if detail:
-                avg_price_str = detail.get("avgPrice", "")
-                if avg_price_str and float(avg_price_str) > 0:
-                    actual_entry_price = float(avg_price_str)
-                    self.logger.info(
-                        f"   Fill price: {actual_entry_price:.6f} "
-                        f"(vs candle close: {current_price:.6f})"
-                    )
-                    # Log fill analysis
-                    self.diagnostics.log_fill_analysis(
-                        symbol, current_price, actual_entry_price, dir_str,
-                    )
 
-        # Recalculate SL/TP based on ACTUAL fill price
-        if actual_entry_price != current_price:
-            if direction == TradeDirection.LONG:
-                stop_loss = actual_entry_price - sl_distance
-                take_profit = actual_entry_price + tp_distance
-            else:
-                stop_loss = actual_entry_price + sl_distance
-                take_profit = actual_entry_price - tp_distance
+        # -- Step 7: Register as PENDING order with TTL --
+        # We do NOT register as open position yet — only when FILLED
+        pending_info = {
+            "symbol": symbol,
+            "order_id": order_id,
+            "side": side,
+            "direction": direction,
+            "limit_price": limit_price,
+            "market_price_at_signal": current_price,
+            "stop_loss": stop_loss,
+            "take_profit": take_profit,
+            "quantity": quantity,
+            "risk_usdt": size_info["risk_usdt"],
+            "score": scoring.total_score,
+            "placed_at": time.time(),
+            "ttl_seconds": 240,  # 4 minutes TTL
+            "max_price_deviation_pct": 0.01,  # cancel if price moves 1% away
+        }
+        self._pending_orders.append(pending_info)
 
-        # -- Step 7: Register position in engine --
-        position = LivePosition(
-            symbol=symbol,
-            direction=direction,
-            entry_price=actual_entry_price,  # REAL fill price
-            entry_time=datetime.now(timezone.utc),
-            quantity=quantity,
-            risk_usdt=size_info["risk_usdt"],
-            stop_loss=stop_loss,
-            take_profit=take_profit,
-            initial_stop_loss=stop_loss,
-            score_at_entry=scoring.total_score,
-            cluster_id=self.engine.cluster_guard.cluster_map.get(symbol, -1),
-        )
-        self.engine.open_positions.append(position)
-
-        # Log successful entry
         self.diagnostics.log_entry_decision(
-            symbol, "ENTRY",
-            f"Score={scoring.confidence_pct:.1f}% | {scoring.n_indicators_firing} indicators",
-            score=scoring.total_score, direction=dir_str, price=actual_entry_price,
+            symbol, "PENDING",
+            f"Limit order placed | TTL=4min | Score={scoring.confidence_pct:.1f}%",
+            score=scoring.total_score, direction=dir_str, price=limit_price,
             extra={
-                "fill_price": actual_entry_price,
-                "candle_close": current_price,
-                "sl": stop_loss,
-                "tp": take_profit,
-                "qty": quantity,
-                "risk_usdt": size_info["risk_usdt"],
-                "order_type": order_type,
+                "order_id": order_id,
+                "limit_price": limit_price,
+                "market_price": current_price,
+                "discount_pct": round(discount / current_price * 100, 3),
             }
         )
         self.diagnostics.clear_signal_price(symbol)
 
-        self.logger.info(f"  >>> Order CONFIRMED -- Position registered")
-        return position
+        self.logger.info(f"  >>> LIMIT order placed — waiting for fill (TTL=4min)")
+        # Return None because position is not yet confirmed
+        return None
+
+    # ──────────────────────────────────────────────
+    # PENDING ORDERS — Check fills, TTL, cancellation
+    # ──────────────────────────────────────────────
+
+    def _manage_pending_orders(self):
+        """
+        Check all pending limit orders:
+          - If FILLED → register as open position
+          - If TTL expired → cancel order
+          - If price moved too far against us → cancel (trend reversed)
+        """
+        if not self._pending_orders:
+            return
+
+        self.logger.info(f"\n  Checking {len(self._pending_orders)} pending orders...")
+
+        still_pending = []
+        now = time.time()
+
+        for order in self._pending_orders:
+            symbol = order["symbol"]
+            order_id = order["order_id"]
+            placed_at = order["placed_at"]
+            ttl = order["ttl_seconds"]
+            elapsed = now - placed_at
+
+            # Check 1: TTL expired?
+            if elapsed > ttl:
+                self.logger.info(
+                    f"    EXPIRED: {symbol} limit order (TTL={ttl}s elapsed)"
+                )
+                self.connector.cancel_order(symbol, order_id)
+                self.diagnostics.log_entry_decision(
+                    symbol, "CANCEL", f"TTL expired ({elapsed:.0f}s > {ttl}s)",
+                    direction=order["direction"].value, price=order["limit_price"],
+                )
+                continue
+
+            # Check 2: Has the order been filled?
+            detail = self.connector.get_order_detail(symbol, order_id)
+            if detail:
+                order_status = detail.get("orderStatus", "")
+
+                if order_status == "Filled":
+                    # ORDER FILLED! Register as open position
+                    avg_price_str = detail.get("avgPrice", "")
+                    fill_price = float(avg_price_str) if avg_price_str else order["limit_price"]
+
+                    self.logger.info(
+                        f"    FILLED: {symbol} {order['direction'].value} "
+                        f"@ {fill_price:.6f} (limit was {order['limit_price']:.6f})"
+                    )
+
+                    # Register position
+                    position = LivePosition(
+                        symbol=symbol,
+                        direction=order["direction"],
+                        entry_price=fill_price,
+                        entry_time=datetime.now(timezone.utc),
+                        quantity=order["quantity"],
+                        risk_usdt=order["risk_usdt"],
+                        stop_loss=order["stop_loss"],
+                        take_profit=order["take_profit"],
+                        initial_stop_loss=order["stop_loss"],
+                        score_at_entry=order["score"],
+                        cluster_id=self.engine.cluster_guard.cluster_map.get(symbol, -1),
+                    )
+                    self.engine.open_positions.append(position)
+
+                    self.diagnostics.log_entry_decision(
+                        symbol, "ENTRY",
+                        f"Limit FILLED @ {fill_price:.6f}",
+                        score=order["score"],
+                        direction=order["direction"].value,
+                        price=fill_price,
+                        extra={"fill_price": fill_price, "wait_time": f"{elapsed:.0f}s"},
+                    )
+                    self.diagnostics.log_fill_analysis(
+                        symbol, order["market_price_at_signal"],
+                        fill_price, order["direction"].value,
+                    )
+                    continue
+
+                elif order_status in ("Cancelled", "Rejected", "Deactivated"):
+                    self.logger.info(f"    {order_status}: {symbol} order by exchange")
+                    continue
+
+            # Check 3: Price moved too far — cancel (trend reversed)
+            current_price = self.connector.get_ticker_price(symbol)
+            if current_price > 0:
+                deviation = abs(current_price - order["limit_price"]) / order["limit_price"]
+                max_dev = order["max_price_deviation_pct"]
+
+                if deviation > max_dev:
+                    # Price moved away from our limit — trend may have reversed
+                    self.logger.info(
+                        f"    CANCEL: {symbol} price deviation "
+                        f"{deviation*100:.2f}% > {max_dev*100:.1f}% limit"
+                    )
+                    self.connector.cancel_order(symbol, order_id)
+                    self.diagnostics.log_entry_decision(
+                        symbol, "CANCEL",
+                        f"Price deviation {deviation*100:.2f}% (trend reversal)",
+                        direction=order["direction"].value, price=current_price,
+                    )
+                    continue
+
+            # Still pending, keep tracking
+            still_pending.append(order)
+            self.logger.info(
+                f"    WAITING: {symbol} ({elapsed:.0f}s / {ttl}s TTL)"
+            )
+
+        self._pending_orders = still_pending
+
+    # ──────────────────────────────────────────────
+    # TRAILING PROFIT — Extend TP when trend continues
+    # ──────────────────────────────────────────────
+
+    def _extend_tp_for_open_positions(self, all_candles: dict[str, pd.DataFrame]):
+        """
+        If we have an open position and the signal STILL fires in same direction,
+        extend TP by 1*ATR instead of opening a new position.
+        This is the 'ride the trend until reversal' logic.
+        """
+        for pos in self.engine.open_positions:
+            if pos.state == PositionState.CLOSED:
+                continue
+
+            df = all_candles.get(pos.symbol)
+            if df is None or len(df) < 50:
+                continue
+
+            # Check if scoring still favors our direction
+            scoring = self._analyze_symbol(pos.symbol, df)
+            if scoring is None or not scoring.is_tradeable:
+                continue
+
+            # Only extend if signal is in SAME direction as our position
+            if scoring.direction != pos.direction:
+                continue
+
+            # Calculate ATR for extension
+            import pandas_ta as ta
+            atr_series = ta.atr(
+                df["high"].astype(float),
+                df["low"].astype(float),
+                df["close"].astype(float),
+                length=14
+            )
+            if atr_series is None:
+                continue
+            atr_val = float(atr_series.iloc[-1])
+            if np.isnan(atr_val) or atr_val <= 0:
+                continue
+
+            current_price = float(df["close"].iloc[-1])
+
+            # Extend TP by 1*ATR if price is moving in our favor
+            if pos.direction == TradeDirection.LONG:
+                unrealized = (current_price - pos.entry_price) / pos.entry_price
+                if unrealized > 0.005:  # only extend if already in profit
+                    new_tp = current_price + atr_val * 2
+                    if new_tp > pos.take_profit:
+                        old_tp = pos.take_profit
+                        pos.take_profit = new_tp
+                        self.logger.info(
+                            f"    >> TP EXTENDED: {pos.symbol} LONG "
+                            f"| Old TP: {old_tp:.6f} -> New TP: {new_tp:.6f} "
+                            f"(+{atr_val*2/current_price*100:.2f}%)"
+                        )
+            else:
+                unrealized = (pos.entry_price - current_price) / pos.entry_price
+                if unrealized > 0.005:
+                    new_tp = current_price - atr_val * 2
+                    if new_tp < pos.take_profit:
+                        old_tp = pos.take_profit
+                        pos.take_profit = new_tp
+                        self.logger.info(
+                            f"    >> TP EXTENDED: {pos.symbol} SHORT "
+                            f"| Old TP: {old_tp:.6f} -> New TP: {new_tp:.6f}"
+                        )
 
     # ──────────────────────────────────────────────
     # MONITORING — Manage open positions
@@ -821,6 +988,7 @@ class LiveBot:
         self.logger.info(f"  │ Max DD:      {status['max_drawdown_pct']:.2f}%                   │")
         risk_str = f"${status['current_risk_usdt']:.2f} ({status['current_risk_pct']:.1f}%)"
         self.logger.info(f"  │ Risk/Trade:  {risk_str:<23}│")
+        self.logger.info(f"  │ Pending:     {len(self._pending_orders)} limit orders           │")
         self.logger.info(f"  │ Orders:      {self.total_orders_placed} placed                │")
         self.logger.info("  └──────────────────────────────────────┘")
 
@@ -879,6 +1047,9 @@ class LiveBot:
                 # ── Phase 2: Monitor existing positions ──
                 self._monitor_positions()
 
+                # ── Phase 2.5: Manage pending limit orders (TTL/fill/cancel) ──
+                self._manage_pending_orders()
+
                 # -- Phase 3: Scan for new entries (PARALLEL) --
                 self.logger.info(f"\n  Scanning {len(self.symbols)} symbols (parallel)...")
 
@@ -894,8 +1065,26 @@ class LiveBot:
                     f"in {fetch_time:.1f}s"
                 )
 
+                # ── Phase 3.1: Extend TP for open positions (trail to target) ──
+                self._extend_tp_for_open_positions(all_candles)
+
+                # ── Phase 3.2: Build set of symbols we already hold/pending ──
+                # HARD ANTI-PYRAMID: skip any symbol with open position OR pending order
+                occupied_symbols: set[str] = set()
+                for pos in self.engine.open_positions:
+                    if pos.state != PositionState.CLOSED:
+                        occupied_symbols.add(pos.symbol.replace("/", ""))
+                for pend in self._pending_orders:
+                    occupied_symbols.add(pend["symbol"].replace("/", ""))
+
+                # ── Phase 3.3: Scan for new entries ──
                 for symbol, df in all_candles.items():
                     self.total_signals_checked += 1
+
+                    # HARD ANTI-PYRAMID at scan level — skip occupied symbols
+                    sym_clean = symbol.replace("/", "")
+                    if sym_clean in occupied_symbols:
+                        continue
 
                     # Analyze
                     scoring = self._analyze_symbol(symbol, df)
@@ -992,6 +1181,16 @@ class LiveBot:
                     "state": p.state.value,
                 }
                 for p in self.engine.open_positions
+            ],
+            "pending_orders": [
+                {
+                    "symbol": o["symbol"],
+                    "order_id": o["order_id"],
+                    "direction": o["direction"].value,
+                    "limit_price": o["limit_price"],
+                    "quantity": o["quantity"],
+                }
+                for o in self._pending_orders
             ],
             "trade_history": self.engine.compound.trade_history[-50:],
         }
