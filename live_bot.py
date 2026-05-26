@@ -78,7 +78,11 @@ from aegis_live_engine import (
     ScoringResult,
 )
 from generate_weight_matrix import _compute_indicator_signals
+import os
+from dotenv import load_dotenv
 
+# Загружаем ключи из .env.local
+load_dotenv(".env.local")
 
 # ══════════════════════════════════════════════════════════════════
 # LOGGING SETUP

@@ -109,8 +109,8 @@ class ScoringEngine:
     """
 
     # Entry threshold: the normalized weighted score must exceed this
-    ENTRY_THRESHOLD: float = 0.65       # Tuned for quality (0.5=aggressive, 0.8=conservative)
-    CHAOS_THRESHOLD: float = 0.45       # If opposing score is > 45% of total → chaos → no trade
+    ENTRY_THRESHOLD: float = 0.30       # Tuned for quality (0.5=aggressive, 0.8=conservative)
+    CHAOS_THRESHOLD: float = 0.50       # If opposing score is > 45% of total → chaos → no trade
 
     def __init__(self, indicator_weights: dict[str, dict]):
         """
