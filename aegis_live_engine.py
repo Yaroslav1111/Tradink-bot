@@ -109,8 +109,8 @@ class ScoringEngine:
     """
 
     # Entry threshold: the normalized weighted score must exceed this
-    ENTRY_THRESHOLD: float = 0.30       # Tuned for quality (0.5=aggressive, 0.8=conservative)
-    CHAOS_THRESHOLD: float = 0.50       # If opposing score is > 45% of total → chaos → no trade
+    ENTRY_THRESHOLD: float = 0.60       # 0.60 = balanced (requires 5+ strong indicators)
+    CHAOS_THRESHOLD: float = 0.45       # If opposing score is > 45% of total → chaos → no trade
 
     def __init__(self, indicator_weights: dict[str, dict]):
         """
@@ -1065,6 +1065,71 @@ class BybitDemoConnector:
         except Exception as e:
             logger.debug(f"Failed to get order detail: {e}")
             return None
+
+    def cancel_order(self, symbol: str, order_id: str) -> bool:
+        """Cancel a pending order by orderId."""
+        if not self._connected or not order_id:
+            return False
+        try:
+            result = self.session.cancel_order(
+                category="linear",
+                symbol=symbol.replace("/", ""),
+                orderId=order_id,
+            )
+            if result.get("retCode") == 0:
+                logger.info(f"  Order cancelled: {order_id} ({symbol})")
+                return True
+            else:
+                logger.debug(f"Cancel failed: {result}")
+                return False
+        except Exception as e:
+            logger.debug(f"Cancel order error: {e}")
+            return False
+
+    def cancel_all_orders(self, symbol: str) -> bool:
+        """Cancel all open orders for a symbol."""
+        if not self._connected:
+            return False
+        try:
+            result = self.session.cancel_all_orders(
+                category="linear",
+                symbol=symbol.replace("/", ""),
+            )
+            return result.get("retCode") == 0
+        except Exception as e:
+            logger.debug(f"Cancel all orders error: {e}")
+            return False
+
+    def get_open_orders(self, symbol: str = "") -> list[dict]:
+        """Get open/pending orders."""
+        if not self._connected:
+            return []
+        try:
+            params = {"category": "linear"}
+            if symbol:
+                params["symbol"] = symbol.replace("/", "")
+            result = self.session.get_open_orders(**params)
+            if result.get("retCode") == 0:
+                return result["result"]["list"]
+            return []
+        except Exception as e:
+            logger.debug(f"Get open orders error: {e}")
+            return []
+
+    def get_ticker_price(self, symbol: str) -> float:
+        """Get current last traded price (faster than full kline fetch)."""
+        if not self._connected:
+            return 0.0
+        try:
+            result = self.session.get_tickers(
+                category="linear",
+                symbol=symbol.replace("/", ""),
+            )
+            if result.get("retCode") == 0 and result["result"]["list"]:
+                return float(result["result"]["list"][0]["lastPrice"])
+            return 0.0
+        except Exception:
+            return 0.0
 
     def close_position(self, symbol: str, side: str, qty: float) -> dict | None:
         """Close a position by placing opposite market order."""
