@@ -1,6 +1,8 @@
 """
-Aegis-Quant-Lab — Global Configuration
-Central registry of all constants, asset lists, and simulation parameters.
+Aegis-Quant-Lab v4.0 — Global Configuration
+═══════════════════════════════════════════════
+Architecture: Fibonacci Reversal Sniper
+  Impulse → Fibo Pullback → Limit Order → Trail to Exhaustion
 """
 
 import os
@@ -18,122 +20,111 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 os.makedirs(LOG_DIR, exist_ok=True)
 
 # ──────────────────────────────────────────────
-# Bybit — supported linear perpetual tickers
+# Bybit Demo API
 # ──────────────────────────────────────────────
-DEFAULT_SYMBOLS: list[str] = [
-    "BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT", "XRP/USDT",
-    "DOGE/USDT", "ADA/USDT", "AVAX/USDT", "DOT/USDT", "LINK/USDT",
-    "MATIC/USDT", "TON/USDT", "TRX/USDT", "1000SHIB/USDT", "UNI/USDT",
-    "ATOM/USDT", "LTC/USDT", "BCH/USDT", "NEAR/USDT", "APT/USDT",
-    "FIL/USDT", "ARB/USDT", "OP/USDT", "SUI/USDT", "HYPE/USDT",
-    "IMX/USDT", "1000PEPE/USDT", "WIF/USDT", "FET/USDT", "RENDER/USDT",
-    "INJ/USDT", "SEI/USDT", "STX/USDT", "AAVE/USDT", "MKR/USDT",
-    "RUNE/USDT", "TIA/USDT", "ALGO/USDT", "FTM/USDT", "SAND/USDT",
-    "MANA/USDT", "GALA/USDT", "EOS/USDT", "XLM/USDT", "IOTA/USDT",
-    "DYDX/USDT", "CRV/USDT", "COMP/USDT", "JASMY/USDT", "1000BONK/USDT",
-    "WLD/USDT", "JUP/USDT", "ENA/USDT", "PENDLE/USDT", "ORDI/USDT",
+BYBIT_DEMO_ENDPOINT: str = "https://api-demo.bybit.com"
+
+# ──────────────────────────────────────────────
+# Monitored symbols (linear perpetual, Bybit format)
+# ──────────────────────────────────────────────
+SYMBOLS: list[str] = [
+    "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT",
+    "DOGEUSDT", "ADAUSDT", "AVAXUSDT", "DOTUSDT", "LINKUSDT",
+    "MATICUSDT", "TONUSDT", "TRXUSDT", "1000SHIBUSDT", "UNIUSDT",
+    "ATOMUSDT", "LTCUSDT", "BCHUSDT", "NEARUSDT", "APTUSDT",
+    "FILUSDT", "ARBUSDT", "OPUSDT", "SUIUSDT", "HYPEUSDT",
+    "IMXUSDT", "1000PEPEUSDT", "WIFUSDT", "FETUSDT", "RENDERUSDT",
+    "INJUSDT", "SEIUSDT", "STXUSDT", "AAVEUSDT", "MKRUSDT",
+    "RUNEUSDT", "TIAUSDT", "ALGOUSDT", "FTMUSDT", "SANDUSDT",
+    "MANAUSDT", "GALAUSDT", "EOSUSDT", "XLMUSDT", "IOTAUSDT",
+    "DYDXUSDT", "CRVUSDT", "COMPUSDT", "JASMYUSDT",
 ]
 
 # ──────────────────────────────────────────────
-# Timeframes
+# Timeframe
 # ──────────────────────────────────────────────
-SUPPORTED_TIMEFRAMES: list[str] = ["15m", "1h", "3h"]
-DEFAULT_TIMEFRAME: str = "1h"
+CANDLE_INTERVAL: str = "15"      # minutes (Bybit kline interval)
+CANDLE_LIMIT: int = 200          # bars to fetch per symbol
+
+# ──────────────────────────────────────────────
+# Component 1: Reversal Engine (oscillator extremes)
+# ──────────────────────────────────────────────
+# Oscillator thresholds for REVERSAL detection
+RSI_OVERSOLD: float = 15.0       # RSI14 < 15 → extreme oversold
+RSI_OVERBOUGHT: float = 85.0     # RSI14 > 85 → extreme overbought
+CCI_OVERSOLD: float = -250.0     # CCI14 < -250 → extreme oversold
+CCI_OVERBOUGHT: float = 250.0    # CCI14 > 250 → extreme overbought
+WILLR_OVERSOLD: float = -95.0    # Williams%R < -95 → extreme oversold
+WILLR_OVERBOUGHT: float = -5.0   # Williams%R > -5 → extreme overbought
+
+# Minimum oscillators in resonance for signal (out of 3)
+MIN_OSCILLATORS_FIRING: int = 2  # need 2/3 oscillators at extremes
+
+# Swing detection
+SWING_LOOKBACK: int = 50         # bars to scan for swing high/low
+
+# ──────────────────────────────────────────────
+# Component 2: Fibonacci Entry (Maker Sniper)
+# ──────────────────────────────────────────────
+FIBO_LEVEL_PRIMARY: float = 0.618     # golden ratio (main entry)
+FIBO_LEVEL_SECONDARY: float = 0.50    # 50% retracement (aggressive)
+FIBO_IMPULSE_BARS: int = 50           # bars lookback for impulse swing
+
+# Limit order settings
+ORDER_TYPE: str = "Limit"             # Limit = Maker fee
+TIME_IN_FORCE: str = "PostOnly"       # guaranteed maker (rejected if would be taker)
+ORDER_TTL_SECONDS: int = 240          # 4 minutes TTL (cancel if not filled)
+PRICE_DEVIATION_CANCEL_PCT: float = 0.01  # 1% — cancel if price moves away
+
+# Fees
+MAKER_FEE_RATE: float = 0.0002       # 0.020% per side (Bybit VIP0 Maker)
+TAKER_FEE_RATE: float = 0.00055      # 0.055% per side (Bybit VIP0 Taker)
+ROUNDTRIP_FEE_MAKER: float = 0.0004  # 0.04% total roundtrip (maker both sides)
+
+# ──────────────────────────────────────────────
+# Component 3: Single-Entry Lock (Anti-Pyramid)
+# ──────────────────────────────────────────────
+MAX_CONCURRENT_POSITIONS: int = 5    # max simultaneous open positions
+MAX_ENTRIES_PER_CYCLE: int = 3       # don't enter more than 3 per scan
+# Rule: 1 symbol = 1 position. No averaging, no grid, no pyramiding.
+
+# ──────────────────────────────────────────────
+# Component 4: Trailing to Exhaustion
+# ──────────────────────────────────────────────
+# Breakeven
+BREAKEVEN_TRIGGER_PCT: float = 0.015  # +1.5% → move SL to entry + fees
+BREAKEVEN_FEE_BUFFER: float = 0.0004  # add maker roundtrip fee to breakeven SL
+
+# Trailing stop
+TRAILING_TRIGGER_PCT: float = 0.030   # +3.0% → activate trailing
+TRAILING_DISTANCE_PCT: float = 0.015  # trail 1.5% behind highest point
+
+# Fibonacci extension targets (informational / partial exits)
+FIBO_EXT_1: float = 1.618            # first extension target
+FIBO_EXT_2: float = 2.618            # second extension target
+
+# Exit on reversal: if oscillators flip to opposite extreme → close position
+EXIT_ON_REVERSAL: bool = True
+
+# ──────────────────────────────────────────────
+# Risk Management
+# ──────────────────────────────────────────────
+INITIAL_CAPITAL: float = 2000.0       # starting balance USDT
+LEVERAGE: float = 5.0                 # trading leverage
+RISK_PER_TRADE_PCT: float = 0.01      # 1% of balance per trade
+RISK_REWARD_RATIO: float = 2.0        # initial TP = 2x SL distance
+MAX_DAILY_LOSS_PCT: float = 0.05      # 5% daily loss → stop trading
+
+# Compound interest
+COMPOUND_ENABLED: bool = True
+COMPOUND_LOSS_STREAK_THRESHOLD: int = 3   # reduce risk after N consecutive losses
+COMPOUND_RISK_REDUCED: float = 0.005      # 0.5% risk after loss streak
+COMPOUND_RISK_NORMAL: float = 0.01        # 1% risk normally
+COMPOUND_MAX_RISK: float = 0.02           # hard cap: never risk more than 2%
 
 # ──────────────────────────────────────────────
 # Bybit API rate-limiting
 # ──────────────────────────────────────────────
-BYBIT_RATE_LIMIT_SLEEP: float = 0.35        # seconds between requests
-BYBIT_BATCH_SIZE: int = 1000                 # candles per request (max 1000)
-BYBIT_MAX_RETRIES: int = 5
-
-# ──────────────────────────────────────────────
-# Simulation — Realistic Bybit costs (VIP 0)
-# Official: Maker 0.020%, Taker 0.055%
-# ──────────────────────────────────────────────
-FEE_RATE: float = 0.00055         # 0.055 % taker fee (per side) — Bybit VIP 0
-MAKER_FEE_RATE: float = 0.0002    # 0.020 % maker fee (per side) — Bybit VIP 0
-SLIPPAGE: float = 0.0000          # slippage embedded into taker fee model
-TOTAL_COST_PER_SIDE: float = FEE_RATE + SLIPPAGE   # 0.055 % per side
-ROUNDTRIP_FEE: float = 0.0011     # 0.11% total (entry taker + exit taker)
-ROUNDTRIP_FEE_LIMIT: float = 0.0004  # 0.04% total (entry maker + exit maker)
-USE_LIMIT_ORDERS: bool = True     # True = Limit (maker), False = Market (taker)
-
-# ──────────────────────────────────────────────
-# Walk-Forward Analysis
-# ──────────────────────────────────────────────
-WFA_IN_SAMPLE_RATIO: float = 0.70   # 70 % for training
-WFA_OUT_SAMPLE_RATIO: float = 0.30  # 30 % for validation
-WFA_MIN_TRADES: int = 30            # minimum trades to consider result valid
-
-# ──────────────────────────────────────────────
-# Statistics
-# ──────────────────────────────────────────────
-STAT_P_VALUE_THRESHOLD: float = 0.01
-BOOTSTRAP_ITERATIONS: int = 1000
-
-# ──────────────────────────────────────────────
-# Cross-asset
-# ──────────────────────────────────────────────
-CORRELATION_THRESHOLD: float = 0.75
-ROLLING_CORR_WINDOW: int = 60       # bars
-
-# ──────────────────────────────────────────────
-# Feature Factory
-# ──────────────────────────────────────────────
-TA_CORES: int = 4
-DOWNCAST_DTYPE: str = "float32"
-
-# ──────────────────────────────────────────────
-# Weighted Consensus Voting System
-# ──────────────────────────────────────────────
-CONSENSUS_TOP_N_INDICATORS: int = 15        # number of indicators that vote
-CONSENSUS_MIN_AGREEMENT: float = 0.70       # 70% = 10.5/15 must agree for signal
-CONSENSUS_DISSONANCE_THRESHOLD: float = 0.55  # if split is 55/45 or closer → chaos → no trade
-FORWARD_BARS: int = 4                       # evaluate trade outcome after N bars (4 bars = 1h on 15m)
-MIN_WEIGHT_THRESHOLD: float = 0.0           # indicators with EV <= 0 get weight = 0
-
-# ──────────────────────────────────────────────
-# Risk Management (for $2000 USDT deposit)
-# ──────────────────────────────────────────────
-DEFAULT_CAPITAL: float = 2000.0             # starting capital USDT
-RISK_PER_TRADE_PCT: float = 0.01            # 1% risk per trade
-RISK_REWARD_RATIO: float = 2.0              # 1:2 risk/reward
-MAX_CONCURRENT_TRADES: int = 5              # max simultaneous positions
-MAX_DAILY_LOSS_PCT: float = 0.05            # 5% daily loss limit
-
-# ──────────────────────────────────────────────
-# v3.0 — Adaptive Scoring Engine Parameters
-# ──────────────────────────────────────────────
-SCORING_ENTRY_THRESHOLD: float = 0.65       # min weighted score for entry (0.5=aggro, 0.8=conserv)
-SCORING_CHAOS_THRESHOLD: float = 0.45       # max opposing score ratio before chaos block
-SCORING_TOP_N: int = 15                     # number of top indicators used in scoring
-
-# ──────────────────────────────────────────────
-# v3.0 — Breakeven & Trailing Stop
-# ──────────────────────────────────────────────
-BREAKEVEN_TRIGGER_PCT: float = 0.015        # +1.5% unrealized → move SL to breakeven
-TRAILING_TRIGGER_PCT: float = 0.030         # +3.0% unrealized → activate trailing stop
-TRAILING_DISTANCE_PCT: float = 0.015        # trail 1.5% behind highest/lowest
-
-# ──────────────────────────────────────────────
-# v3.0 — Compound Interest
-# ──────────────────────────────────────────────
-COMPOUND_ENABLED: bool = True               # enable dynamic position sizing
-COMPOUND_RISK_NORMAL: float = 0.01          # 1% risk normally
-COMPOUND_RISK_REDUCED: float = 0.005        # 0.5% risk after loss streak
-COMPOUND_LOSS_STREAK_THRESHOLD: int = 3     # reduce risk after N consecutive losses
-COMPOUND_MAX_RISK: float = 0.02             # hard cap: never risk more than 2%
-
-# ──────────────────────────────────────────────
-# v3.0 — Cluster Guard
-# ──────────────────────────────────────────────
-CLUSTER_CORRELATION_BLOCK: float = 0.75     # block if corr > this
-CLUSTER_MAX_PER_GROUP: int = 2              # max positions in same cluster
-
-# ──────────────────────────────────────────────
-# v3.0 — Bybit Demo API
-# ──────────────────────────────────────────────
-BYBIT_DEMO_ENDPOINT: str = "https://api-demo.bybit.com"
-BYBIT_DEMO_API_KEY: str = ""                # set via environment variable
-BYBIT_DEMO_API_SECRET: str = ""             # set via environment variable
+BYBIT_RATE_LIMIT_SLEEP: float = 0.35
+BYBIT_MAX_RETRIES: int = 3
+PARALLEL_WORKERS: int = 10            # ThreadPoolExecutor workers for candle fetch
