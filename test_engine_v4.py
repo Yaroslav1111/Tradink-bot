@@ -395,14 +395,6 @@ def test_config_integrity():
     assert len(config.SYMBOLS) >= 40
     assert config.CASCADE_ENABLED is True
     assert config.CASCADE_RISK_SPLIT == 0.5
-    # v4.2 new params
-    assert config.POC_ENABLED is True
-    assert config.POC_1M_LOOKBACK == 60
-    assert 0 < config.POC_WEIGHT_VS_FIBO <= 1.0
-    assert config.SL_ATR_MULTIPLIER == 2.0
-    assert config.TRAILING_ATR_CUSHION == 0.2
-    assert config.MAKER_EXIT_ENABLED is True
-    assert config.MAKER_TP_REPOSITION_TRIGGER == 0.8
     print(f"  ✅ All config values valid")
     print(f"     RSI thresholds: {config.RSI_OVERSOLD}/{config.RSI_OVERBOUGHT}")
     print(f"     Fibo levels: 0.50 + 0.618 (cascade)")
@@ -410,9 +402,6 @@ def test_config_integrity():
     print(f"     Symbols: {len(config.SYMBOLS)}")
     print(f"     Maker fee: {config.MAKER_FEE_RATE*100:.3f}%")
     print(f"     Cascade: enabled (split {config.CASCADE_RISK_SPLIT*100:.0f}%/{config.CASCADE_RISK_SPLIT*100:.0f}%)")
-    print(f"     POC: enabled (1m lookback={config.POC_1M_LOOKBACK}, weight={config.POC_WEIGHT_VS_FIBO})")
-    print(f"     Shadow Trail: ATR cushion={config.TRAILING_ATR_CUSHION}")
-    print(f"     Maker Exit: TP reposition at {config.MAKER_TP_REPOSITION_TRIGGER*100:.0f}%")
 
 
 def test_cascade_fibo():
@@ -425,6 +414,8 @@ def test_cascade_fibo():
     e50, e618 = FiboCalculator.calculate_cascade_entries(
         100.0, 80.0, TradeDirection.LONG, current_price=95.0
     )
+    # entry_50 = 100 - 20*0.50 = 90.0
+    # entry_618 = 100 - 20*0.618 = 87.64
     assert abs(e50 - 90.0) < 0.01, f"Cascade LONG 0.50 wrong: {e50}"
     assert abs(e618 - 87.64) < 0.01, f"Cascade LONG 0.618 wrong: {e618}"
     assert e618 < e50, "0.618 must be deeper (lower) than 0.50 for LONG"
@@ -434,6 +425,8 @@ def test_cascade_fibo():
     e50_s, e618_s = FiboCalculator.calculate_cascade_entries(
         100.0, 80.0, TradeDirection.SHORT, current_price=85.0
     )
+    # entry_50 = 80 + 20*0.50 = 90.0
+    # entry_618 = 80 + 20*0.618 = 92.36
     assert abs(e50_s - 90.0) < 0.01, f"Cascade SHORT 0.50 wrong: {e50_s}"
     assert abs(e618_s - 92.36) < 0.01, f"Cascade SHORT 0.618 wrong: {e618_s}"
     assert e618_s > e50_s, "0.618 must be deeper (higher) than 0.50 for SHORT"
@@ -447,17 +440,21 @@ def test_negative_spread_protection():
     print("─" * 60)
 
     # Scenario: price crashed to 60, but swing_high is still 100
+    # Raw Fibo 0.618 = 100 - 20*0.618 = 87.64 → ABOVE current price (60)!
     e50, e618 = FiboCalculator.calculate_cascade_entries(
         100.0, 80.0, TradeDirection.LONG, current_price=60.0
     )
-    max_allowed = 60.0 * 0.999
+    max_allowed = 60.0 * 0.999  # must be below market
     assert e50 <= max_allowed, f"LONG limit {e50:.4f} above market cap {max_allowed:.4f}!"
     assert e618 <= max_allowed, f"LONG limit {e618:.4f} above market cap!"
     assert e618 < e50, "0.618 must still be deeper than 0.50"
     print(f"  ✅ Crash scenario (market=60): limits clamped to {e50:.4f} / {e618:.4f}")
     print(f"     (both below market cap {max_allowed:.4f})")
 
-    # SHORT: tight range scenario
+    # SHORT: price pumped to 120, swing_low=80
+    # Raw 0.618 = 80 + 20*0.618 = 92.36 → BELOW current price (120) → OK normally
+    # But what if swing range is tiny? H=121, L=120, current=121.5
+    # Raw 0.50 = 120 + 1*0.50 = 120.5 → BELOW current 121.5 → BAD for SHORT
     e50_s, e618_s = FiboCalculator.calculate_cascade_entries(
         121.0, 120.0, TradeDirection.SHORT, current_price=121.5
     )
@@ -483,190 +480,14 @@ def test_ttl_increased():
     print(f"  ✅ Default TTL: {pending.ttl_seconds}s = {pending.ttl_seconds/60:.0f} minutes")
 
 
-def test_volume_profile_poc():
-    """Test 11: Volume Profile POC calculation."""
-    print("\n" + "─" * 60)
-    print("  TEST 11: Volume Profile POC (Lazy Sniper)")
-    print("─" * 60)
-
-    # Create 1m data with clear volume cluster at ~92
-    np.random.seed(42)
-    n_bars = 60
-    prices = np.linspace(88, 96, n_bars) + np.random.normal(0, 0.3, n_bars)
-    volumes = np.random.uniform(100, 500, n_bars)
-
-    # Create a massive volume cluster at prices 91-93
-    for i in range(20, 35):
-        prices[i] = 92.0 + np.random.uniform(-0.5, 0.5)
-        volumes[i] = 3000 + np.random.uniform(0, 2000)  # 6-10x normal
-
-    df_1m = pd.DataFrame({
-        "open": prices - 0.1,
-        "high": prices + 0.3,
-        "low": prices - 0.3,
-        "close": prices,
-        "volume": volumes,
-    })
-
-    # LONG scenario: current price 95, looking for entry below
-    poc = VolumeProfiler.calculate_poc(
-        df_1m, atr_15m=2.0, direction=TradeDirection.LONG, current_price=95.0
-    )
-    assert poc is not None, "POC should be found in volume cluster"
-    assert 90.0 <= poc <= 94.0, f"POC should be near 92, got {poc:.2f}"
-    print(f"  ✅ POC found: {poc:.2f} (expected ~92, volume cluster zone)")
-
-    # POC is below current price (valid for LONG entry)
-    assert poc < 95.0, "POC must be below market for LONG"
-    print(f"  ✅ POC < market price (valid for LONG entry)")
-
-    # SHORT scenario: POC above market (should return None if POC below market)
-    poc_invalid = VolumeProfiler.calculate_poc(
-        df_1m, atr_15m=2.0, direction=TradeDirection.SHORT, current_price=95.0
-    )
-    # POC ~92 is below 95 → invalid for SHORT
-    assert poc_invalid is None, "POC below market should be None for SHORT"
-    print(f"  ✅ POC below market: None for SHORT (correct filter)")
-
-    # Blending test
-    fibo_price = 87.64  # 0.618 retracement
-    blended = VolumeProfiler.blend_poc_with_fibo(poc, fibo_price)
-    expected_blend = poc * 0.6 + fibo_price * 0.4  # 60/40
-    assert abs(blended - expected_blend) < 0.01
-    print(f"  ✅ POC-Fibo blend: {blended:.2f} (POC×0.6 + Fibo×0.4)")
-    print(f"     POC={poc:.2f}, Fibo={fibo_price:.2f} → Blend={blended:.2f}")
-
-    # None POC → pure Fibo fallback
-    pure_fibo = VolumeProfiler.blend_poc_with_fibo(None, fibo_price)
-    assert abs(pure_fibo - fibo_price) < 0.01
-    print(f"  ✅ No POC → pure Fibo fallback: {pure_fibo:.2f}")
-
-    # Insufficient data
-    df_tiny = pd.DataFrame({
-        "open": [100.0] * 5, "high": [101.0] * 5,
-        "low": [99.0] * 5, "close": [100.0] * 5,
-        "volume": [100.0] * 5,
-    })
-    poc_none = VolumeProfiler.calculate_poc(
-        df_tiny, atr_15m=2.0, direction=TradeDirection.LONG, current_price=102.0
-    )
-    assert poc_none is None, "Insufficient data should return None"
-    print(f"  ✅ Insufficient 1m data: None (correct)")
-
-
-def test_shadow_trailing_mechanics():
-    """Test 12: Shadow trailing with candle-based SL movement."""
-    print("\n" + "─" * 60)
-    print("  TEST 12: Shadow Trailing Mechanics (Candle-Based)")
-    print("─" * 60)
-
-    pm = PositionManager()
-
-    # LONG position that reached trailing phase
-    pos = LivePosition(
-        symbol="SOLUSDT",
-        direction=TradeDirection.LONG,
-        entry_price=100.0,
-        entry_time=datetime.now(timezone.utc),
-        quantity=1.0,
-        risk_usdt=20.0,
-        stop_loss=96.0,
-        take_profit=112.36,
-        initial_stop_loss=96.0,
-        highest_price=103.5,
-        lowest_price=100.0,
-        entry_atr=2.0,
-        state=PositionState.TRAILING,  # Already in trailing
-    )
-
-    # Candle 1: low=102.5 → SL should be 102.5 - 0.2*2.0 = 102.1
-    pos = pm.update(pos, 104.0, prev_candle_low=102.5, prev_candle_high=104.5)
-    expected_sl1 = 102.5 - (2.0 * config.TRAILING_ATR_CUSHION)
-    assert abs(pos.stop_loss - expected_sl1) < 0.01, f"SL wrong: {pos.stop_loss}"
-    print(f"  ✅ Candle 1 (low=102.5): SL={pos.stop_loss:.2f} (expected {expected_sl1:.2f})")
-
-    # Candle 2: higher low=103.8 → SL should move up
-    pos = pm.update(pos, 106.0, prev_candle_low=103.8, prev_candle_high=106.5)
-    expected_sl2 = 103.8 - (2.0 * config.TRAILING_ATR_CUSHION)
-    assert pos.stop_loss >= expected_sl2 - 0.01
-    print(f"  ✅ Candle 2 (low=103.8): SL={pos.stop_loss:.2f} (moved up)")
-
-    # Candle 3: LOWER low=101.0 → SL should NOT move back down
-    old_sl = pos.stop_loss
-    pos = pm.update(pos, 105.5, prev_candle_low=101.0, prev_candle_high=106.0)
-    assert pos.stop_loss == old_sl, "SL must never decrease for LONG!"
-    print(f"  ✅ Candle 3 (low=101.0): SL unchanged at {pos.stop_loss:.2f} (monotonic)")
-
-    # Test without candle data (fallback to percentage trailing)
-    pos2 = LivePosition(
-        symbol="ETHUSDT",
-        direction=TradeDirection.LONG,
-        entry_price=100.0,
-        entry_time=datetime.now(timezone.utc),
-        quantity=1.0,
-        risk_usdt=20.0,
-        stop_loss=96.0,
-        take_profit=112.36,
-        initial_stop_loss=96.0,
-        highest_price=105.0,
-        lowest_price=100.0,
-        entry_atr=2.0,
-        state=PositionState.TRAILING,
-    )
-    pos2 = pm.update(pos2, 105.0, prev_candle_low=0.0, prev_candle_high=0.0)
-    expected_fallback = 105.0 * (1 - config.TRAILING_DISTANCE_PCT)
-    assert abs(pos2.stop_loss - expected_fallback) < 0.01
-    print(f"  ✅ No candle data: fallback SL={pos2.stop_loss:.4f} (pct-based)")
-
-
-def test_maker_exit_config():
-    """Test 13: Maker exit and TP repositioning config."""
-    print("\n" + "─" * 60)
-    print("  TEST 13: Maker Exit Configuration")
-    print("─" * 60)
-
-    assert config.MAKER_EXIT_ENABLED is True
-    assert config.MAKER_TP_REPOSITION_TRIGGER == 0.8
-
-    # Verify LivePosition has tp_repositioned field
-    pos = LivePosition(
-        symbol="TEST",
-        direction=TradeDirection.LONG,
-        entry_price=100.0,
-        entry_time=datetime.now(timezone.utc),
-        quantity=1.0,
-        risk_usdt=10.0,
-        stop_loss=96.0,
-        take_profit=112.36,
-        initial_stop_loss=96.0,
-        fibo_ext_1_price=112.36,
-        fibo_ext_2_price=132.36,
-    )
-    assert pos.tp_repositioned is False
-    assert pos.tp_order_id == ""
-    assert pos.fibo_ext_1_price == 112.36
-    assert pos.fibo_ext_2_price == 132.36
-    print(f"  ✅ Maker exit: enabled")
-    print(f"     TP starts at ext_1.618={pos.fibo_ext_1_price:.2f}")
-    print(f"     Repositions to ext_2.618={pos.fibo_ext_2_price:.2f} at {config.MAKER_TP_REPOSITION_TRIGGER*100:.0f}% progress")
-    print(f"     Saves taker fee: 0.055% → 0.020% per exit")
-
-    # Calculate savings on $2000 position exit
-    position_value = 2000.0
-    taker_cost = position_value * config.TAKER_FEE_RATE
-    maker_cost = position_value * config.MAKER_FEE_RATE
-    savings = taker_cost - maker_cost
-    print(f"  ✅ Fee savings per $2000 exit: ${savings:.2f} (taker=${taker_cost:.2f} vs maker=${maker_cost:.2f})")
-
-
 # ══════════════════════════════════════════════════════════════════
 # RUN ALL TESTS
 # ══════════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
     print("\n" + "=" * 70)
-    print("  AEGIS-QUANT-LAB v4.2 — TEST SUITE")
-    print("  Architecture: Fibonacci Reversal Sniper + Volume POC + Shadow Trail")
+    print("  AEGIS-QUANT-LAB v4.1 — TEST SUITE")
+    print("  Architecture: Fibonacci Reversal Sniper + Cascade Laddering")
     print("=" * 70)
 
     test_reversal_engine()
@@ -679,10 +500,7 @@ if __name__ == "__main__":
     test_cascade_fibo()
     test_negative_spread_protection()
     test_ttl_increased()
-    test_volume_profile_poc()
-    test_shadow_trailing_mechanics()
-    test_maker_exit_config()
 
     print("\n" + "=" * 70)
-    print("  🎉 ALL 13 TESTS PASSED — v4.2 ready for deployment!")
+    print("  🎉 ALL 10 TESTS PASSED — v4.1 ready for deployment!")
     print("=" * 70 + "\n")

@@ -117,8 +117,6 @@ class PendingOrder:
     # Cascade twin tracking
     cascade_group_id: str = ""       # shared ID linking twin orders
     cascade_level: str = ""          # "0.50" or "0.618"
-    # v4.2: ATR at signal time (carried into position)
-    signal_atr: float = 0.0
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -242,7 +240,6 @@ class FiboCalculator:
     Computes Fibonacci retracement and extension levels.
 
     v4.1: CASCADE MODE — two entry levels (0.50 and 0.618).
-    v4.2: Blended with Volume POC for precision targeting.
     Extensions: 1.618 and 2.618 for trailing TP targets.
     """
 

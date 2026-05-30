@@ -370,7 +370,6 @@ class LiveBot:
                     lowest_price=avg_entry,
                     fibo_ext_1_price=o1.fibo_ext_1,
                     fibo_ext_2_price=o1.fibo_ext_2,
-                    entry_atr=o1.signal_atr,
                 )
                 self.open_positions.append(pos)
 
@@ -396,7 +395,6 @@ class LiveBot:
                         lowest_price=order.limit_price,
                         fibo_ext_1_price=order.fibo_ext_1,
                         fibo_ext_2_price=order.fibo_ext_2,
-                        entry_atr=order.signal_atr,
                     )
                     self.open_positions.append(pos)
 
@@ -559,13 +557,11 @@ class LiveBot:
 
     def _execute_entry(self, signal: ReversalSignal) -> bool:
         """
-        Execute entry using v4.2 pipeline:
-          1. Fetch 1m candles for this symbol (Lazy Sniper — single API call)
-          2. Calculate Volume POC from 1m micro-structure
-          3. Blend POC with Fibonacci cascade levels
-          4. Apply negative spread protection
-          5. Place TWO LIMIT orders (PostOnly) as linked twins
-          6. Register both as pending with shared cascade_group_id
+        Execute entry using CASCADE Fibonacci Order Laddering (v4.1):
+          1. Calculate TWO Fibo entry prices (0.50 and 0.618)
+          2. Split risk 50/50 between the two levels
+          3. Place TWO LIMIT orders (PostOnly) as linked twins
+          4. Register both as pending with shared cascade_group_id
         """
         import uuid
 
@@ -574,59 +570,27 @@ class LiveBot:
         atr = signal.atr_value
         side = "Buy" if direction == TradeDirection.LONG else "Sell"
 
-        # ── v4.2: Fetch 1m candles for POC (Lazy Sniper) ──
-        poc_price = None
-        if config.POC_ENABLED:
-            df_1m = self._fetch_1m_candles(symbol)
-            if df_1m is not None:
-                poc_price = VolumeProfiler.calculate_poc(
-                    df_1m, atr, direction, signal.current_price
-                )
-                if poc_price:
-                    self.logger.info(
-                        f"    📊 POC found: {poc_price:.6f} "
-                        f"(1m volume cluster)"
-                    )
-
         # ── Calculate CASCADE entry prices with negative spread protection ──
         entry_50, entry_618 = FiboCalculator.calculate_cascade_entries(
             signal.swing_high, signal.swing_low, direction, signal.current_price
         )
-
-        # ── v4.2: Blend POC with Fibo entries ──
-        if poc_price is not None:
-            entry_50 = VolumeProfiler.blend_poc_with_fibo(poc_price, entry_50)
-            entry_618 = VolumeProfiler.blend_poc_with_fibo(poc_price, entry_618)
-
-            # Re-apply negative spread protection after blending
-            if direction == TradeDirection.LONG:
-                max_buy = signal.current_price * 0.999
-                entry_50 = min(entry_50, max_buy)
-                entry_618 = min(entry_618, max_buy)
-                if entry_618 >= entry_50:
-                    entry_618 = entry_50 * 0.998
-            else:
-                min_sell = signal.current_price * 1.001
-                entry_50 = max(entry_50, min_sell)
-                entry_618 = max(entry_618, min_sell)
-                if entry_618 <= entry_50:
-                    entry_618 = entry_50 * 1.002
 
         # ── Fibo extensions (for trailing targets + Maker TP) ──
         ext_1, ext_2 = FiboCalculator.calculate_extensions(
             signal.swing_high, signal.swing_low, direction
         )
 
-        # ── SL: ATR-based (2×ATR from deeper entry) ──
-        sl_distance = atr * config.SL_ATR_MULTIPLIER
+        # ── SL/TP (calculated from the deeper 0.618 level) ──
+        sl_distance = atr * 2.0
         if direction == TradeDirection.LONG:
             stop_loss = entry_618 - sl_distance
-            take_profit = ext_1  # Maker TP at ext_1.618
+            take_profit = entry_50 + sl_distance * config.RISK_REWARD_RATIO
         else:
             stop_loss = entry_618 + sl_distance
-            take_profit = ext_1  # Maker TP at ext_1.618
+            take_profit = entry_50 - sl_distance * config.RISK_REWARD_RATIO
 
         # ── Position sizes (split risk 50/50) ──
+        # Each leg gets half the total risk
         half_risk_pct = self.compound.current_risk_pct * config.CASCADE_RISK_SPLIT
 
         # Leg 1 (0.50 level)
@@ -671,11 +635,10 @@ class LiveBot:
         self.logger.info(f"  ╠══════════════════════════════════════════════════╣")
         self.logger.info(f"  ║  Oscillators: {signal.oscillators_firing}/3 at extremes")
         self.logger.info(f"  ║  RSI={signal.rsi_value:.1f} | CCI={signal.cci_value:.0f} | W%R={signal.willr_value:.1f}")
-        self.logger.info(f"  ║  Market:     {signal.current_price:.6f}{poc_str}")
+        self.logger.info(f"  ║  Market:     {signal.current_price:.6f}")
         self.logger.info(f"  ║  Leg 1 (0.50):  {entry_50:.6f} | Qty: {qty_50} | Risk: ${risk_usdt_50:.2f}")
         self.logger.info(f"  ║  Leg 2 (0.618): {entry_618:.6f} | Qty: {qty_618} | Risk: ${risk_usdt_618:.2f}")
-        self.logger.info(f"  ║  SL: {stop_loss:.6f} (ATR×{config.SL_ATR_MULTIPLIER})")
-        self.logger.info(f"  ║  TP: {take_profit:.6f} (Fibo ext 1.618 — Maker exit)")
+        self.logger.info(f"  ║  SL: {stop_loss:.6f} | TP: {take_profit:.6f}")
         self.logger.info(f"  ║  Fibo Ext: 1.618={ext_1:.6f} | 2.618={ext_2:.6f}")
         self.logger.info(f"  ║  TTL: {config.ORDER_TTL_SECONDS}s | PostOnly (Maker)")
         self.logger.info(f"  ╚══════════════════════════════════════════════════╝")
@@ -707,7 +670,6 @@ class LiveBot:
                     fibo_ext_2=ext_2,
                     cascade_group_id=cascade_id,
                     cascade_level="0.50",
-                    signal_atr=atr,
                 ))
             else:
                 self.logger.error(f"  ❌ Leg 1 (0.50) FAILED for {symbol}")
@@ -737,7 +699,6 @@ class LiveBot:
                     fibo_ext_2=ext_2,
                     cascade_group_id=cascade_id,
                     cascade_level="0.618",
-                    signal_atr=atr,
                 ))
             else:
                 self.logger.error(f"  ❌ Leg 2 (0.618) FAILED for {symbol}")
