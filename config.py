@@ -73,8 +73,12 @@ FIBO_IMPULSE_BARS: int = 50           # bars lookback for impulse swing
 # Limit order settings
 ORDER_TYPE: str = "Limit"             # Limit = Maker fee
 TIME_IN_FORCE: str = "PostOnly"       # guaranteed maker (rejected if would be taker)
-ORDER_TTL_SECONDS: int = 240          # 4 minutes TTL (cancel if not filled)
+ORDER_TTL_SECONDS: int = 600          # 10 minutes TTL (full candle + buffer)
 PRICE_DEVIATION_CANCEL_PCT: float = 0.01  # 1% — cancel if price moves away
+
+# Cascade order laddering
+CASCADE_ENABLED: bool = True          # True = dual orders at 0.50 and 0.618
+CASCADE_RISK_SPLIT: float = 0.5       # each leg gets 50% of total risk
 
 # Fees
 MAKER_FEE_RATE: float = 0.0002       # 0.020% per side (Bybit VIP0 Maker)
