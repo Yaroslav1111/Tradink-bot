@@ -1,16 +1,22 @@
 #!/usr/bin/env python3
 """
-Aegis-Quant-Lab v4.0 — LIVE BOT «Fibonacci Reversal Sniper»
+Aegis-Quant-Lab v4.2 — LIVE BOT «Fibonacci Reversal Sniper»
 ══════════════════════════════════════════════════════════════════
 
-Architecture: Impulse → Fibo Pullback → Limit Order → Trail to Exhaustion
+Architecture: Impulse → POC+Fibo Blend → Limit Order → Shadow Trail → Maker Exit
+
+v4.2 Upgrades:
+  - Volume Profile POC (Lazy Sniper: only 1m fetch after 15m signal fires)
+  - 3-Phase Trailing (ATR buffer → Breakeven → Shadow-based trailing)
+  - Maker exits (limit TP at ext_1.618 with dynamic repositioning to ext_2.618)
+  - SHORT fully supported (no directional bias)
 
 Execution cycle (every 15 minutes):
   1. Wake at candle close
   2. Manage pending limit orders (check fills, TTL, deviation)
-  3. Monitor open positions (breakeven, trailing, reversal exit)
-  4. Scan ALL symbols for oscillator reversal resonance
-  5. If reversal detected → calculate Fibo entry → place Limit order
+  3. Monitor open positions (shadow trailing, TP repositioning, reversal exit)
+  4. Scan ALL symbols for oscillator reversal resonance (15m)
+  5. If reversal detected → fetch 1m → compute POC → blend with Fibo → Limit order
   6. Sleep until next candle
 
 Usage:
@@ -44,6 +50,7 @@ import config
 from aegis_live_engine import (
     ReversalEngine,
     FiboCalculator,
+    VolumeProfiler,
     PositionManager,
     CompoundCalculator,
     BybitConnector,
@@ -117,12 +124,13 @@ class LiveBot:
     """
     Fibonacci Reversal Sniper — autonomous 24/7 trading loop.
 
-    Components:
-      - ReversalEngine: detects oscillator exhaustion
+    v4.2 Components:
+      - ReversalEngine: detects oscillator exhaustion (15m)
+      - VolumeProfiler: finds POC from 1m micro-structure (Lazy Sniper)
       - FiboCalculator: computes entry/extension levels
-      - PositionManager: breakeven + trailing stop
+      - PositionManager: 3-phase trailing (shadow-based)
       - CompoundCalculator: dynamic position sizing
-      - BybitConnector: limit orders on demo API
+      - BybitConnector: limit orders on demo API (Maker entry + exit)
     """
 
     def __init__(
@@ -156,14 +164,16 @@ class LiveBot:
 
         # ── Banner ──
         self.logger.info("=" * 70)
-        self.logger.info("  🎯 AEGIS-QUANT-LAB v4.0 — Fibonacci Reversal Sniper")
+        self.logger.info("  🎯 AEGIS-QUANT-LAB v4.2 — Fibonacci Reversal Sniper")
         self.logger.info("=" * 70)
         self.logger.info(f"  Capital:    ${initial_capital:.2f} USDT")
         self.logger.info(f"  Leverage:   {leverage}x")
         self.logger.info(f"  Symbols:    {len(self.symbols)} coins")
         self.logger.info(f"  Interval:   {interval_minutes}m candles")
-        self.logger.info(f"  Strategy:   Oscillator Reversal → Fibo 0.618 Entry → Trail")
+        self.logger.info(f"  Strategy:   Oscillator Reversal → POC+Fibo → Limit → Shadow Trail")
         self.logger.info(f"  Order type: Limit (PostOnly, Maker 0.020%)")
+        self.logger.info(f"  Exits:      Limit TP (Maker) + Shadow Trailing SL")
+        self.logger.info(f"  Directions: LONG + SHORT (symmetric)")
         self.logger.info(f"  TTL:        {config.ORDER_TTL_SECONDS}s")
         self.logger.info("=" * 70)
 
@@ -223,16 +233,33 @@ class LiveBot:
 
         return results
 
+    def _fetch_1m_candles(self, symbol: str) -> Optional[pd.DataFrame]:
+        """
+        Fetch 1-minute candles for POC calculation.
+        Called ONLY when a 15m signal fires — Lazy Sniper pattern.
+        Single API call, no parallelism needed.
+        """
+        try:
+            df = self.connector.get_klines(
+                symbol, interval="1", limit=config.POC_1M_LOOKBACK
+            )
+            if df is not None and len(df) >= 20:
+                return df
+            return None
+        except Exception:
+            return None
+
     # ──────────────────────────────────────────────
     # PENDING ORDERS MANAGEMENT
     # ──────────────────────────────────────────────
 
     def _manage_pending_orders(self):
         """
-        Check all pending limit orders:
-          - FILLED → register as open position
-          - TTL expired → cancel
-          - Price deviation > 1% → cancel (trend reversed)
+        Check all pending limit orders (CASCADE-aware):
+          - FILLED → register as open position (or merge with twin)
+          - TTL expired → cancel (and cancel twin if exists)
+          - Price deviation > 1% → cancel
+          - Twin logic: if both filled → merge into single position with avg price
         """
         if not self.pending_orders:
             return
@@ -240,6 +267,7 @@ class LiveBot:
         self.logger.info(f"\n  ⏳ Checking {len(self.pending_orders)} pending orders...")
 
         still_pending = []
+        filled_orders: list[PendingOrder] = []  # collect fills this cycle
         now = time.time()
 
         for order in self.pending_orders:
@@ -248,7 +276,8 @@ class LiveBot:
             # Check 1: TTL expired
             if elapsed > order.ttl_seconds:
                 self.logger.info(
-                    f"    ⌛ EXPIRED: {order.symbol} (TTL {order.ttl_seconds}s elapsed)"
+                    f"    ⌛ EXPIRED: {order.symbol} [{order.cascade_level}] "
+                    f"(TTL {order.ttl_seconds}s)"
                 )
                 self.connector.cancel_order(order.symbol, order.order_id)
                 continue
@@ -264,30 +293,16 @@ class LiveBot:
 
                     self.logger.info(
                         f"    ✅ FILLED: {order.symbol} {order.direction.value} "
-                        f"@ {fill_price:.6f} (waited {elapsed:.0f}s)"
+                        f"[{order.cascade_level}] @ {fill_price:.6f} ({elapsed:.0f}s)"
                     )
-
-                    # Register as open position
-                    pos = LivePosition(
-                        symbol=order.symbol,
-                        direction=order.direction,
-                        entry_price=fill_price,
-                        entry_time=datetime.now(timezone.utc),
-                        quantity=order.quantity,
-                        risk_usdt=order.risk_usdt,
-                        stop_loss=order.stop_loss,
-                        take_profit=order.take_profit,
-                        initial_stop_loss=order.stop_loss,
-                        highest_price=fill_price,
-                        lowest_price=fill_price,
-                        fibo_ext_1_price=order.fibo_ext_1,
-                        fibo_ext_2_price=order.fibo_ext_2,
-                    )
-                    self.open_positions.append(pos)
+                    order.limit_price = fill_price  # update with actual fill
+                    filled_orders.append(order)
                     continue
 
                 elif status in ("Cancelled", "Rejected", "Deactivated"):
-                    self.logger.info(f"    ❌ {status}: {order.symbol}")
+                    self.logger.info(
+                        f"    ❌ {status}: {order.symbol} [{order.cascade_level}]"
+                    )
                     continue
 
             # Check 3: Price deviation — cancel if price moved away
@@ -296,29 +311,116 @@ class LiveBot:
                 deviation = abs(current_price - order.limit_price) / order.limit_price
                 if deviation > order.max_deviation_pct:
                     self.logger.info(
-                        f"    📉 CANCEL: {order.symbol} | price deviated "
-                        f"{deviation*100:.2f}% > {order.max_deviation_pct*100:.1f}%"
+                        f"    📉 CANCEL: {order.symbol} [{order.cascade_level}] "
+                        f"deviation {deviation*100:.2f}%"
                     )
                     self.connector.cancel_order(order.symbol, order.order_id)
                     continue
 
             # Still pending
             still_pending.append(order)
-            self.logger.info(f"    ⏳ WAITING: {order.symbol} ({elapsed:.0f}s/{order.ttl_seconds}s)")
+            self.logger.info(
+                f"    ⏳ WAITING: {order.symbol} [{order.cascade_level}] "
+                f"({elapsed:.0f}s/{order.ttl_seconds}s)"
+            )
 
         self.pending_orders = still_pending
 
+        # ── Process filled orders: merge cascade twins ──
+        if not filled_orders:
+            return
+
+        # Group filled orders by cascade_group_id
+        groups: dict[str, list[PendingOrder]] = {}
+        for order in filled_orders:
+            gid = order.cascade_group_id or order.order_id
+            groups.setdefault(gid, []).append(order)
+
+        for group_id, group_orders in groups.items():
+            if len(group_orders) == 2:
+                # BOTH twins filled → merge into single position with avg price
+                o1, o2 = group_orders
+                total_qty = o1.quantity + o2.quantity
+                avg_entry = (
+                    (o1.limit_price * o1.quantity + o2.limit_price * o2.quantity)
+                    / total_qty
+                )
+                total_risk = o1.risk_usdt + o2.risk_usdt
+
+                # SL/TP from the deeper order (0.618)
+                sl = o2.stop_loss if o2.cascade_level == "0.618" else o1.stop_loss
+                tp = o1.take_profit  # both have same TP target
+
+                self.logger.info(
+                    f"    🔗 MERGED: {o1.symbol} | Avg entry: {avg_entry:.6f} "
+                    f"| Total qty: {total_qty}"
+                )
+
+                pos = LivePosition(
+                    symbol=o1.symbol,
+                    direction=o1.direction,
+                    entry_price=avg_entry,
+                    entry_time=datetime.now(timezone.utc),
+                    quantity=total_qty,
+                    risk_usdt=total_risk,
+                    stop_loss=sl,
+                    take_profit=tp,
+                    initial_stop_loss=sl,
+                    highest_price=avg_entry,
+                    lowest_price=avg_entry,
+                    fibo_ext_1_price=o1.fibo_ext_1,
+                    fibo_ext_2_price=o1.fibo_ext_2,
+                    entry_atr=o1.signal_atr,
+                )
+                self.open_positions.append(pos)
+
+                # Cancel any remaining twin still pending
+                for pend in self.pending_orders[:]:
+                    if pend.cascade_group_id == group_id:
+                        self.connector.cancel_order(pend.symbol, pend.order_id)
+                        self.pending_orders.remove(pend)
+            else:
+                # Single fill (twin may still be pending or expired)
+                for order in group_orders:
+                    pos = LivePosition(
+                        symbol=order.symbol,
+                        direction=order.direction,
+                        entry_price=order.limit_price,
+                        entry_time=datetime.now(timezone.utc),
+                        quantity=order.quantity,
+                        risk_usdt=order.risk_usdt,
+                        stop_loss=order.stop_loss,
+                        take_profit=order.take_profit,
+                        initial_stop_loss=order.stop_loss,
+                        highest_price=order.limit_price,
+                        lowest_price=order.limit_price,
+                        fibo_ext_1_price=order.fibo_ext_1,
+                        fibo_ext_2_price=order.fibo_ext_2,
+                        entry_atr=order.signal_atr,
+                    )
+                    self.open_positions.append(pos)
+
+                    # Cancel the twin if still pending
+                    for pend in self.pending_orders[:]:
+                        if (pend.cascade_group_id == group_id
+                                and pend.order_id != order.order_id):
+                            self.logger.info(
+                                f"    🗑️ Cancel twin: {pend.symbol} [{pend.cascade_level}]"
+                            )
+                            self.connector.cancel_order(pend.symbol, pend.order_id)
+                            self.pending_orders.remove(pend)
+
     # ──────────────────────────────────────────────
-    # POSITION MONITORING
+    # POSITION MONITORING (v4.2: Shadow Trailing + Maker TP)
     # ──────────────────────────────────────────────
 
     def _monitor_positions(self, all_candles: dict[str, pd.DataFrame]):
         """
         Monitor all open positions:
-          - Update price tracking
-          - Apply breakeven/trailing logic
+          - Extract prev candle low/high for shadow trailing
+          - Apply 3-phase position management
           - Check for oscillator reversal → exit
-          - Close if SL hit
+          - Reposition limit TP when trailing extends past ext_1.618
         """
         if not self.open_positions:
             return
@@ -339,11 +441,19 @@ class LiveBot:
 
             current_price = float(df["close"].iloc[-1])
 
+            # Extract previous candle's low/high for shadow trailing
+            prev_candle_low = float(df["low"].iloc[-2]) if len(df) >= 2 else 0.0
+            prev_candle_high = float(df["high"].iloc[-2]) if len(df) >= 2 else 0.0
+
             # Check for oscillator reversal (exit signal)
             reversal = self.position_manager.check_reversal_for_exit(pos, df)
 
-            # Update position state (breakeven/trailing/close)
-            updated = self.position_manager.update(pos, current_price, reversal)
+            # Update position state (3-phase trailing)
+            updated = self.position_manager.update(
+                pos, current_price, reversal,
+                prev_candle_low=prev_candle_low,
+                prev_candle_high=prev_candle_high,
+            )
 
             if updated.state == PositionState.CLOSED:
                 # Close position on exchange
@@ -360,6 +470,36 @@ class LiveBot:
                     f"PnL=${updated.pnl_usdt:+.2f} | {updated.close_reason}"
                 )
             else:
+                # ── v4.2: Dynamic TP repositioning ──
+                if (updated.state == PositionState.TRAILING
+                        and not updated.tp_repositioned
+                        and updated.fibo_ext_1_price > 0
+                        and updated.fibo_ext_2_price > 0):
+                    # Check if price has passed 80% of ext_1 target
+                    if updated.direction == TradeDirection.LONG:
+                        progress = (current_price - updated.entry_price) / (
+                            updated.fibo_ext_1_price - updated.entry_price
+                        ) if updated.fibo_ext_1_price != updated.entry_price else 0
+                    else:
+                        progress = (updated.entry_price - current_price) / (
+                            updated.entry_price - updated.fibo_ext_1_price
+                        ) if updated.fibo_ext_1_price != updated.entry_price else 0
+
+                    if progress >= config.MAKER_TP_REPOSITION_TRIGGER:
+                        # Reposition TP to ext_2.618 (let profits run)
+                        new_tp = updated.fibo_ext_2_price
+                        self.connector.set_trading_stop(
+                            updated.symbol,
+                            take_profit=new_tp,
+                            stop_loss=updated.stop_loss,
+                        )
+                        updated.take_profit = new_tp
+                        updated.tp_repositioned = True
+                        self.logger.info(
+                            f"    🎯 TP REPOSITIONED: {updated.symbol} → "
+                            f"ext_2.618={new_tp:.6f}"
+                        )
+
                 still_open.append(updated)
                 state_emoji = {
                     PositionState.OPEN: "🔵",
@@ -404,7 +544,7 @@ class LiveBot:
                         f"  🔄 {pos.symbol} closed by exchange (server-side SL/TP)"
                     )
                     pos.state = PositionState.CLOSED
-                    pos.close_reason = "Exchange SL/TP"
+                    pos.close_reason = "Exchange SL/TP (Maker exit)"
                     self.closed_positions.append(pos)
                 else:
                     still_open.append(pos)
@@ -414,116 +554,202 @@ class LiveBot:
             self.logger.debug(f"  Sync warning: {e}")
 
     # ──────────────────────────────────────────────
-    # ENTRY EXECUTION
+    # ENTRY EXECUTION (v4.2: POC + Fibo blend)
     # ──────────────────────────────────────────────
 
     def _execute_entry(self, signal: ReversalSignal) -> bool:
         """
-        Execute entry based on reversal signal:
-          1. Calculate Fibo entry price
-          2. Calculate SL/TP
-          3. Calculate position size
-          4. Place LIMIT order (PostOnly)
-          5. Register as pending order
+        Execute entry using v4.2 pipeline:
+          1. Fetch 1m candles for this symbol (Lazy Sniper — single API call)
+          2. Calculate Volume POC from 1m micro-structure
+          3. Blend POC with Fibonacci cascade levels
+          4. Apply negative spread protection
+          5. Place TWO LIMIT orders (PostOnly) as linked twins
+          6. Register both as pending with shared cascade_group_id
         """
+        import uuid
+
         symbol = signal.symbol
         direction = signal.direction
-
-        # ── Fibo entry price ──
-        fibo_entry = signal.fibo_entry_price
-
-        # ── SL/TP based on ATR ──
         atr = signal.atr_value
-        sl_distance = atr * 2.0  # 2x ATR stop loss
+        side = "Buy" if direction == TradeDirection.LONG else "Sell"
 
-        if direction == TradeDirection.LONG:
-            stop_loss = fibo_entry - sl_distance
-            take_profit = fibo_entry + sl_distance * config.RISK_REWARD_RATIO
-            side = "Buy"
-        else:
-            stop_loss = fibo_entry + sl_distance
-            take_profit = fibo_entry - sl_distance * config.RISK_REWARD_RATIO
-            side = "Sell"
+        # ── v4.2: Fetch 1m candles for POC (Lazy Sniper) ──
+        poc_price = None
+        if config.POC_ENABLED:
+            df_1m = self._fetch_1m_candles(symbol)
+            if df_1m is not None:
+                poc_price = VolumeProfiler.calculate_poc(
+                    df_1m, atr, direction, signal.current_price
+                )
+                if poc_price:
+                    self.logger.info(
+                        f"    📊 POC found: {poc_price:.6f} "
+                        f"(1m volume cluster)"
+                    )
 
-        # ── Fibo extensions (for trailing targets) ──
+        # ── Calculate CASCADE entry prices with negative spread protection ──
+        entry_50, entry_618 = FiboCalculator.calculate_cascade_entries(
+            signal.swing_high, signal.swing_low, direction, signal.current_price
+        )
+
+        # ── v4.2: Blend POC with Fibo entries ──
+        if poc_price is not None:
+            entry_50 = VolumeProfiler.blend_poc_with_fibo(poc_price, entry_50)
+            entry_618 = VolumeProfiler.blend_poc_with_fibo(poc_price, entry_618)
+
+            # Re-apply negative spread protection after blending
+            if direction == TradeDirection.LONG:
+                max_buy = signal.current_price * 0.999
+                entry_50 = min(entry_50, max_buy)
+                entry_618 = min(entry_618, max_buy)
+                if entry_618 >= entry_50:
+                    entry_618 = entry_50 * 0.998
+            else:
+                min_sell = signal.current_price * 1.001
+                entry_50 = max(entry_50, min_sell)
+                entry_618 = max(entry_618, min_sell)
+                if entry_618 <= entry_50:
+                    entry_618 = entry_50 * 1.002
+
+        # ── Fibo extensions (for trailing targets + Maker TP) ──
         ext_1, ext_2 = FiboCalculator.calculate_extensions(
             signal.swing_high, signal.swing_low, direction
         )
 
-        # ── Position size ──
-        size_info = self.compound.calculate_position_size(
-            entry_price=fibo_entry,
-            stop_loss_price=stop_loss,
-            leverage=self.leverage,
-        )
-        quantity = size_info["quantity"]
+        # ── SL: ATR-based (2×ATR from deeper entry) ──
+        sl_distance = atr * config.SL_ATR_MULTIPLIER
+        if direction == TradeDirection.LONG:
+            stop_loss = entry_618 - sl_distance
+            take_profit = ext_1  # Maker TP at ext_1.618
+        else:
+            stop_loss = entry_618 + sl_distance
+            take_profit = ext_1  # Maker TP at ext_1.618
+
+        # ── Position sizes (split risk 50/50) ──
+        half_risk_pct = self.compound.current_risk_pct * config.CASCADE_RISK_SPLIT
+
+        # Leg 1 (0.50 level)
+        sl_dist_50 = abs(entry_50 - stop_loss) / entry_50
+        if sl_dist_50 <= 0:
+            sl_dist_50 = 0.02
+        risk_usdt_50 = self.compound.current_balance * half_risk_pct
+        pos_value_50 = risk_usdt_50 / sl_dist_50
+        qty_50 = pos_value_50 / entry_50
+
+        # Leg 2 (0.618 level)
+        sl_dist_618 = abs(entry_618 - stop_loss) / entry_618
+        if sl_dist_618 <= 0:
+            sl_dist_618 = 0.02
+        risk_usdt_618 = self.compound.current_balance * half_risk_pct
+        pos_value_618 = risk_usdt_618 / sl_dist_618
+        qty_618 = pos_value_618 / entry_618
 
         # ── Precision ──
         precision = self.connector.get_lot_size_precision(symbol)
-        quantity = round(quantity, precision)
-        if quantity <= 0:
-            self.logger.warning(f"  ⚠️ {symbol} quantity too small")
+        qty_50 = round(qty_50, precision)
+        qty_618 = round(qty_618, precision)
+
+        if qty_50 <= 0 and qty_618 <= 0:
+            self.logger.warning(f"  ⚠️ {symbol} quantities too small")
             return False
 
         # ── Round prices to tick size ──
-        fibo_entry = self.connector.round_price(fibo_entry, symbol)
+        entry_50 = self.connector.round_price(entry_50, symbol)
+        entry_618 = self.connector.round_price(entry_618, symbol)
         stop_loss = self.connector.round_price(stop_loss, symbol)
         take_profit = self.connector.round_price(take_profit, symbol)
 
+        # ── Cascade group ID (links twin orders) ──
+        cascade_id = f"{symbol}_{uuid.uuid4().hex[:8]}"
+
         # ── Log entry details ──
+        poc_str = f" | POC={poc_price:.6f}" if poc_price else " | POC=none"
         self.logger.info("")
-        self.logger.info(f"  ╔══════════════════════════════════════════════╗")
-        self.logger.info(f"  ║  NEW ENTRY: {direction.value} {symbol}")
-        self.logger.info(f"  ╠══════════════════════════════════════════════╣")
+        self.logger.info(f"  ╔══════════════════════════════════════════════════╗")
+        self.logger.info(f"  ║  CASCADE ENTRY: {direction.value} {symbol}")
+        self.logger.info(f"  ╠══════════════════════════════════════════════════╣")
         self.logger.info(f"  ║  Oscillators: {signal.oscillators_firing}/3 at extremes")
         self.logger.info(f"  ║  RSI={signal.rsi_value:.1f} | CCI={signal.cci_value:.0f} | W%R={signal.willr_value:.1f}")
-        self.logger.info(f"  ║  Market:  {signal.current_price:.6f}")
-        self.logger.info(f"  ║  Fibo Entry (0.618): {fibo_entry:.6f}")
-        discount_pct = abs(signal.current_price - fibo_entry) / signal.current_price * 100
-        self.logger.info(f"  ║  Discount: {discount_pct:.2f}% from market")
-        self.logger.info(f"  ║  SL: {stop_loss:.6f} | TP: {take_profit:.6f}")
-        self.logger.info(f"  ║  Qty: {quantity} | Risk: ${size_info['risk_usdt']:.2f}")
+        self.logger.info(f"  ║  Market:     {signal.current_price:.6f}{poc_str}")
+        self.logger.info(f"  ║  Leg 1 (0.50):  {entry_50:.6f} | Qty: {qty_50} | Risk: ${risk_usdt_50:.2f}")
+        self.logger.info(f"  ║  Leg 2 (0.618): {entry_618:.6f} | Qty: {qty_618} | Risk: ${risk_usdt_618:.2f}")
+        self.logger.info(f"  ║  SL: {stop_loss:.6f} (ATR×{config.SL_ATR_MULTIPLIER})")
+        self.logger.info(f"  ║  TP: {take_profit:.6f} (Fibo ext 1.618 — Maker exit)")
         self.logger.info(f"  ║  Fibo Ext: 1.618={ext_1:.6f} | 2.618={ext_2:.6f}")
         self.logger.info(f"  ║  TTL: {config.ORDER_TTL_SECONDS}s | PostOnly (Maker)")
-        self.logger.info(f"  ╚══════════════════════════════════════════════╝")
+        self.logger.info(f"  ╚══════════════════════════════════════════════════╝")
 
-        # ── Place limit order ──
-        order_result = self.connector.place_limit_order(
-            symbol=symbol,
-            side=side,
-            qty=quantity,
-            price=fibo_entry,
-            stop_loss=stop_loss,
-            take_profit=take_profit,
-        )
+        orders_placed = 0
 
-        if order_result is None:
-            self.logger.error(f"  ❌ Order FAILED for {symbol}")
-            return False
+        # ── Place Leg 1: 0.50 level (closer to market) ──
+        if qty_50 > 0:
+            result_50 = self.connector.place_limit_order(
+                symbol=symbol, side=side, qty=qty_50,
+                price=entry_50, stop_loss=stop_loss, take_profit=take_profit,
+            )
+            if result_50:
+                self.total_orders_placed += 1
+                orders_placed += 1
+                self.pending_orders.append(PendingOrder(
+                    symbol=symbol,
+                    order_id=result_50.get("orderId", ""),
+                    direction=direction,
+                    limit_price=entry_50,
+                    stop_loss=stop_loss,
+                    take_profit=take_profit,
+                    quantity=qty_50,
+                    risk_usdt=risk_usdt_50,
+                    placed_at=time.time(),
+                    swing_high=signal.swing_high,
+                    swing_low=signal.swing_low,
+                    fibo_ext_1=ext_1,
+                    fibo_ext_2=ext_2,
+                    cascade_group_id=cascade_id,
+                    cascade_level="0.50",
+                    signal_atr=atr,
+                ))
+            else:
+                self.logger.error(f"  ❌ Leg 1 (0.50) FAILED for {symbol}")
 
-        self.total_orders_placed += 1
-        order_id = order_result.get("orderId", "")
+        # ── Place Leg 2: 0.618 level (deeper) ──
+        if qty_618 > 0:
+            result_618 = self.connector.place_limit_order(
+                symbol=symbol, side=side, qty=qty_618,
+                price=entry_618, stop_loss=stop_loss, take_profit=take_profit,
+            )
+            if result_618:
+                self.total_orders_placed += 1
+                orders_placed += 1
+                self.pending_orders.append(PendingOrder(
+                    symbol=symbol,
+                    order_id=result_618.get("orderId", ""),
+                    direction=direction,
+                    limit_price=entry_618,
+                    stop_loss=stop_loss,
+                    take_profit=take_profit,
+                    quantity=qty_618,
+                    risk_usdt=risk_usdt_618,
+                    placed_at=time.time(),
+                    swing_high=signal.swing_high,
+                    swing_low=signal.swing_low,
+                    fibo_ext_1=ext_1,
+                    fibo_ext_2=ext_2,
+                    cascade_group_id=cascade_id,
+                    cascade_level="0.618",
+                    signal_atr=atr,
+                ))
+            else:
+                self.logger.error(f"  ❌ Leg 2 (0.618) FAILED for {symbol}")
 
-        # ── Register as pending ──
-        pending = PendingOrder(
-            symbol=symbol,
-            order_id=order_id,
-            direction=direction,
-            limit_price=fibo_entry,
-            stop_loss=stop_loss,
-            take_profit=take_profit,
-            quantity=quantity,
-            risk_usdt=size_info["risk_usdt"],
-            placed_at=time.time(),
-            swing_high=signal.swing_high,
-            swing_low=signal.swing_low,
-            fibo_ext_1=ext_1,
-            fibo_ext_2=ext_2,
-        )
-        self.pending_orders.append(pending)
+        if orders_placed > 0:
+            self.logger.info(
+                f"  >>> {orders_placed} cascade order(s) placed "
+                f"(TTL={config.ORDER_TTL_SECONDS}s)"
+            )
+            return True
 
-        self.logger.info(f"  >>> Limit order placed — waiting for fill (TTL={config.ORDER_TTL_SECONDS}s)")
-        return True
+        return False
 
     # ──────────────────────────────────────────────
     # DASHBOARD
@@ -556,21 +782,21 @@ class LiveBot:
 
     def run(self):
         """
-        🎯 Main trading loop — Fibonacci Reversal Sniper.
+        🎯 Main trading loop — Fibonacci Reversal Sniper v4.2.
 
         Cycle:
           1. Sync with exchange
           2. Manage pending orders
-          3. Fetch all candles (parallel)
-          4. Monitor open positions
+          3. Fetch all candles (parallel, 15m)
+          4. Monitor open positions (shadow trailing + TP reposition)
           5. Scan for reversal signals
-          6. Execute entries (limit orders)
+          6. Execute entries (POC+Fibo → limit orders)
           7. Sleep until next candle
         """
         global _shutdown_requested
 
         self.logger.info("\n" + "═" * 70)
-        self.logger.info("  🎯 SNIPER ACTIVATED — Bot is now LIVE")
+        self.logger.info("  🎯 SNIPER ACTIVATED — Bot is now LIVE (v4.2)")
         self.logger.info("  Press Ctrl+C to stop gracefully")
         self.logger.info("═" * 70 + "\n")
 
@@ -610,7 +836,7 @@ class LiveBot:
                 # ── Phase 2: Manage pending limit orders ──
                 self._manage_pending_orders()
 
-                # ── Phase 3: Fetch ALL candles (parallel) ──
+                # ── Phase 3: Fetch ALL candles (parallel, 15m) ──
                 self.logger.info(f"\n  📡 Fetching {len(self.symbols)} symbols...")
                 fetch_start = time.time()
                 all_candles = self._fetch_all_candles()
@@ -619,7 +845,7 @@ class LiveBot:
                     f"  Fetched {len(all_candles)}/{len(self.symbols)} in {fetch_time:.1f}s"
                 )
 
-                # ── Phase 4: Monitor open positions ──
+                # ── Phase 4: Monitor open positions (shadow trailing) ──
                 self._monitor_positions(all_candles)
 
                 # ── Phase 5: Scan for reversal signals ──
@@ -659,7 +885,7 @@ class LiveBot:
                             f"RSI={signal.rsi_value:.1f}"
                         )
 
-                        # Execute entry
+                        # Execute entry (with POC targeting)
                         success = self._execute_entry(signal)
                         if success:
                             entries_made += 1
@@ -711,7 +937,7 @@ class LiveBot:
         # Save state
         state = {
             "shutdown_time": datetime.now(timezone.utc).isoformat(),
-            "version": "4.0",
+            "version": "4.2",
             "cycles_completed": self.cycle_count,
             "total_orders": self.total_orders_placed,
             "compound_status": self.compound.get_status(),
@@ -753,19 +979,20 @@ class DryRunBot:
         self.compound = CompoundCalculator()
 
         self.logger.info("  🧪 DRY-RUN MODE — No real orders")
-        self.logger.info(f"  Symbols: {len(self.symbols)} | Strategy: Fibo Reversal Sniper")
+        self.logger.info(f"  Symbols: {len(self.symbols)} | Strategy: Fibo Reversal Sniper v4.2")
 
     def run_single_cycle(self):
         """Execute one analysis cycle with simulated data."""
         self.logger.info(f"\n{'─' * 60}")
         self.logger.info(f"  🧪 DRY-RUN — {datetime.now(timezone.utc).strftime('%H:%M:%S')}")
         self.logger.info(f"{'─' * 60}")
-        self.logger.info("  Architecture v4.0:")
+        self.logger.info("  Architecture v4.2:")
         self.logger.info("    1. ReversalEngine  — RSI/CCI/WillR oscillator resonance")
-        self.logger.info("    2. FiboCalculator  — 0.618 retracement entry")
-        self.logger.info("    3. PositionManager — Breakeven → Trailing → Reversal exit")
-        self.logger.info("    4. CompoundCalc    — 1% risk, compound growth")
-        self.logger.info("    5. BybitConnector  — Limit PostOnly (maker 0.020%)")
+        self.logger.info("    2. VolumeProfiler  — POC from 1m micro-structure (Lazy Sniper)")
+        self.logger.info("    3. FiboCalculator  — 0.50+0.618 cascade entry (POC blend)")
+        self.logger.info("    4. PositionManager — 3-Phase: Breathing → Breakeven → Shadow Trail")
+        self.logger.info("    5. CompoundCalc    — 1% risk, compound growth")
+        self.logger.info("    6. BybitConnector  — Limit PostOnly (maker 0.020% in+out)")
         self.logger.info("")
 
         # Test Fibo calculation
@@ -779,9 +1006,46 @@ class DryRunBot:
         self.logger.info(f"     Extension 2.618:     {ext2:.2f}")
         self.logger.info("")
 
+        # Test Volume Profile POC
+        self.logger.info("  📊 Volume Profile POC test:")
+        # Simulated 1m data with volume cluster at ~92
+        np.random.seed(42)
+        prices_1m = np.linspace(88, 96, 60) + np.random.normal(0, 0.5, 60)
+        volume_1m = np.random.uniform(100, 500, 60)
+        # Create volume spike at prices 91-93 (simulating POC)
+        for i in range(20, 35):
+            prices_1m[i] = 92.0 + np.random.uniform(-0.5, 0.5)
+            volume_1m[i] = 2000 + np.random.uniform(0, 1000)  # 4-6x normal volume
+
+        df_1m = pd.DataFrame({
+            "open": prices_1m - 0.1,
+            "high": prices_1m + 0.3,
+            "low": prices_1m - 0.3,
+            "close": prices_1m,
+            "volume": volume_1m,
+        })
+        poc = VolumeProfiler.calculate_poc(df_1m, atr_15m=2.0, direction=TradeDirection.LONG, current_price=95.0)
+        if poc:
+            blended = VolumeProfiler.blend_poc_with_fibo(poc, fibo_long)
+            self.logger.info(f"     POC (1m volume cluster): {poc:.2f}")
+            self.logger.info(f"     Fibo 0.618:              {fibo_long:.2f}")
+            self.logger.info(f"     Blended (60/40):         {blended:.2f}")
+        else:
+            self.logger.info(f"     POC: not available (synthetic data)")
+        self.logger.info("")
+
+        # Test Shadow Trailing
+        self.logger.info("  🌙 Shadow Trailing test:")
+        self.logger.info(f"     Phase 1 (Breathing):  SL fixed at entry - {config.SL_ATR_MULTIPLIER}×ATR")
+        self.logger.info(f"     Phase 2 (Breakeven):  +{config.BREAKEVEN_TRIGGER_PCT*100:.1f}% → SL=entry+fees")
+        self.logger.info(f"     Phase 3 (Shadow):     +{config.TRAILING_TRIGGER_PCT*100:.1f}% → SL=prev_low - {config.TRAILING_ATR_CUSHION}×ATR")
+        self.logger.info(f"     Maker TP:             Fibo ext_1.618 → reposition to ext_2.618")
+        self.logger.info("")
+
         status = self.compound.get_status()
         self.logger.info(f"  💰 Capital: ${status['current_balance']:.2f} | "
                          f"Risk/trade: ${status['current_risk_usdt']:.2f}")
+        self.logger.info(f"  📈 Directions: LONG + SHORT (symmetric)")
         self.logger.info("  ✅ Pipeline validated — ready for live deployment!")
 
 
@@ -795,7 +1059,7 @@ def main():
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[attr-defined]
 
     parser = argparse.ArgumentParser(
-        description="Aegis v4.0 — Fibonacci Reversal Sniper",
+        description="Aegis v4.2 — Fibonacci Reversal Sniper",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
