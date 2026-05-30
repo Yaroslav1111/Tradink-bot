@@ -14,8 +14,9 @@ Execution cycle (every 15 minutes):
   6. Sleep until next candle
 
 Usage:
-  export BYBIT_DEMO_KEY="your_key"
-  export BYBIT_DEMO_SECRET="your_secret"
+  # Set keys via .env.local (auto-loaded) or environment variables:
+  export BYBIT_DEMO_API_KEY="your_key"
+  export BYBIT_DEMO_API_SECRET="your_secret"
   python live_bot.py            # live mode
   python live_bot.py --dry-run  # test pipeline without API
 """
@@ -71,11 +72,13 @@ def setup_logging(log_dir: str = "logs") -> logging.Logger:
     logger.setLevel(logging.INFO)
     logger.handlers.clear()
 
+    # Console handler — avoid UnicodeEncodeError on Windows cp1251
     console = logging.StreamHandler(sys.stdout)
     console.setLevel(logging.INFO)
     console.setFormatter(logging.Formatter(
-        "%(asctime)s │ %(message)s", datefmt="%H:%M:%S"
+        "%(asctime)s | %(message)s", datefmt="%H:%M:%S"
     ))
+    console.terminator = "\n"
     logger.addHandler(console)
 
     log_file = os.path.join(log_dir, f"live_bot_{datetime.now().strftime('%Y%m%d')}.log")
@@ -787,6 +790,10 @@ class DryRunBot:
 # ══════════════════════════════════════════════════════════════════
 
 def main():
+    # Force UTF-8 for stdout on Windows (avoids UnicodeEncodeError with emoji/box-drawing)
+    if sys.platform == "win32":
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[attr-defined]
+
     parser = argparse.ArgumentParser(
         description="Aegis v4.0 — Fibonacci Reversal Sniper",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -816,17 +823,17 @@ Examples:
         bot.run_single_cycle()
         return
 
-    # LIVE
-    api_key = os.environ.get("BYBIT_DEMO_KEY", "")
-    api_secret = os.environ.get("BYBIT_DEMO_SECRET", "")
+    # LIVE — Try both naming variants (with and without _API_)
+    api_key = os.environ.get("BYBIT_DEMO_API_KEY") or os.environ.get("BYBIT_DEMO_KEY", "")
+    api_secret = os.environ.get("BYBIT_DEMO_API_SECRET") or os.environ.get("BYBIT_DEMO_SECRET", "")
 
     if not api_key or not api_secret:
         print("\n" + "=" * 60)
-        print("  ⚠️  BYBIT API KEYS NOT SET!")
+        print("  ⚠️  BYBIT API KEYS NOT SET IN ENVIRONMENT OR .env.local!")
         print("=" * 60)
-        print("\n  Set environment variables:")
-        print('    export BYBIT_DEMO_KEY="your_demo_api_key"')
-        print('    export BYBIT_DEMO_SECRET="your_demo_api_secret"')
+        print("\n  Please check your .env.local file or set environment variables:")
+        print('    export BYBIT_DEMO_API_KEY="your_demo_api_key"')
+        print('    export BYBIT_DEMO_API_SECRET="your_demo_api_secret"')
         print("\n  Or run: python live_bot.py --dry-run")
         print()
         sys.exit(1)

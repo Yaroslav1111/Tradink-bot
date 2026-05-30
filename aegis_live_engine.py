@@ -581,7 +581,7 @@ class BybitConnector:
                 testnet=False,
                 api_key=self.api_key,
                 api_secret=self.api_secret,
-                domain="bytick",       # demo domain
+                demo=True,             # → api-demo.bybit.com
             )
             # Test connection
             self._session.get_wallet_balance(accountType="UNIFIED")
