@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-Aegis-Quant-Lab v4.0 — TEST SUITE
+Aegis-Quant-Lab v4.2 — TEST SUITE
 ═══════════════════════════════════
-Tests all components of the Fibonacci Reversal Sniper architecture.
+Tests all components of the Fibonacci Reversal Sniper + Volume POC + Shadow Trailing.
 """
 
 import sys
@@ -16,6 +16,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from aegis_live_engine import (
     ReversalEngine,
     FiboCalculator,
+    VolumeProfiler,
     PositionManager,
     CompoundCalculator,
     LivePosition,
@@ -54,11 +55,9 @@ def test_reversal_engine():
     engine = ReversalEngine()
 
     # Scenario A: Create EXTREME OVERSOLD data (RSI < 15, CCI < -250)
-    # Simulate a massive sell-off (price drops 40% over 100 bars)
     n = 150
     prices = [100.0]
     for i in range(1, n):
-        # Sharp decline with small bounces
         drop = -0.5 + np.random.uniform(-0.2, 0.05)
         prices.append(max(prices[-1] + drop, 55.0))
 
@@ -76,7 +75,6 @@ def test_reversal_engine():
 
     signal = engine.detect("TESTUSDT", df)
 
-    # May or may not fire depending on exact values — test structure
     if signal is not None:
         assert signal.direction == TradeDirection.LONG, "Oversold should signal LONG"
         assert signal.oscillators_firing >= 2, "Need 2+ oscillators"
@@ -133,7 +131,6 @@ def test_fibo_calculator():
 
     # Extensions
     ext1, ext2 = FiboCalculator.calculate_extensions(100.0, 80.0, TradeDirection.LONG)
-    # ext_1.618 for LONG = 100 + 20*(1.618-1) = 100 + 12.36 = 112.36
     expected_ext1 = 100.0 + 20.0 * (1.618 - 1)
     expected_ext2 = 100.0 + 20.0 * (2.618 - 1)
     assert abs(ext1 - expected_ext1) < 0.01, f"Extension 1 wrong: {ext1}"
@@ -142,7 +139,6 @@ def test_fibo_calculator():
 
     # SHORT extensions
     ext1_s, ext2_s = FiboCalculator.calculate_extensions(100.0, 80.0, TradeDirection.SHORT)
-    # ext_1.618 for SHORT = 80 - 20*(1.618-1) = 80 - 12.36 = 67.64
     expected_ext1_s = 80.0 - 20.0 * (1.618 - 1)
     assert abs(ext1_s - expected_ext1_s) < 0.01
     print(f"  ✅ SHORT extensions: 1.618={ext1_s:.2f}, 2.618={ext2_s:.2f}")
@@ -154,14 +150,14 @@ def test_fibo_calculator():
 
 
 def test_position_manager():
-    """Test 3: Breakeven + Trailing stop logic."""
+    """Test 3: 3-Phase trailing (Breathing → Breakeven → Shadow Trail)."""
     print("\n" + "─" * 60)
-    print("  TEST 3: Position Manager (Breakeven + Trailing)")
+    print("  TEST 3: Position Manager (3-Phase Shadow Trailing)")
     print("─" * 60)
 
     pm = PositionManager()
 
-    # Create a LONG position
+    # Create a LONG position with ATR-based SL
     pos = LivePosition(
         symbol="BTCUSDT",
         direction=TradeDirection.LONG,
@@ -169,42 +165,50 @@ def test_position_manager():
         entry_time=datetime.now(timezone.utc),
         quantity=0.1,
         risk_usdt=20.0,
-        stop_loss=96.0,       # -4%
-        take_profit=108.0,    # +8%
+        stop_loss=96.0,       # -4% (2×ATR where ATR=2.0)
+        take_profit=112.36,   # Fibo ext 1.618
         initial_stop_loss=96.0,
         highest_price=100.0,
         lowest_price=100.0,
+        entry_atr=2.0,        # ATR at entry
     )
 
-    # +0.5% — should stay OPEN
-    pos = pm.update(pos, 100.5)
+    # Phase 1: "Breathing Room" — SL should NOT move
+    pos = pm.update(pos, 100.5, prev_candle_low=99.5, prev_candle_high=100.8)
     assert pos.state == PositionState.OPEN
-    print(f"  ✅ +0.5%: OPEN, SL={pos.stop_loss:.2f}")
+    assert pos.stop_loss == 96.0, "Phase 1: SL must stay fixed"
+    print(f"  ✅ Phase 1 (+0.5%): OPEN, SL fixed at {pos.stop_loss:.2f}")
 
-    # +1.6% — should move to BREAKEVEN
-    pos = pm.update(pos, 101.6)
+    # Phase 2: +1.6% → BREAKEVEN
+    pos = pm.update(pos, 101.6, prev_candle_low=100.5, prev_candle_high=101.8)
     assert pos.state == PositionState.BREAKEVEN
     assert pos.stop_loss > 100.0  # SL above entry
-    print(f"  ✅ +1.6%: BREAKEVEN, SL={pos.stop_loss:.4f}")
+    print(f"  ✅ Phase 2 (+1.6%): BREAKEVEN, SL={pos.stop_loss:.4f}")
 
-    # +3.1% — should activate TRAILING
-    pos = pm.update(pos, 103.1)
+    # Phase 3: +3.1% → TRAILING activated
+    pos = pm.update(pos, 103.1, prev_candle_low=102.0, prev_candle_high=103.5)
     assert pos.state == PositionState.TRAILING
-    print(f"  ✅ +3.1%: TRAILING activated")
+    print(f"  ✅ Phase 3 (+3.1%): TRAILING activated")
 
-    # +5.0% — trailing should move SL up
-    pos = pm.update(pos, 105.0)
-    trailing_sl = 105.0 * (1 - config.TRAILING_DISTANCE_PCT)
-    assert pos.stop_loss >= trailing_sl - 0.01
-    print(f"  ✅ +5.0%: Trailing SL={pos.stop_loss:.4f} (expected ~{trailing_sl:.4f})")
+    # Shadow trailing: SL should follow prev_candle_low - 0.2×ATR
+    pos = pm.update(pos, 105.0, prev_candle_low=103.8, prev_candle_high=105.5)
+    expected_shadow_sl = 103.8 - (2.0 * config.TRAILING_ATR_CUSHION)  # 103.8 - 0.4 = 103.4
+    assert pos.stop_loss >= expected_shadow_sl - 0.01
+    print(f"  ✅ Shadow trailing: SL={pos.stop_loss:.4f} (prev_low=103.8, cushion={2.0*config.TRAILING_ATR_CUSHION:.1f})")
 
-    # Price drops to trailing SL — CLOSED
+    # SL can only move UP — try a lower prev_candle_low
+    old_sl = pos.stop_loss
+    pos = pm.update(pos, 104.5, prev_candle_low=100.0, prev_candle_high=105.0)
+    assert pos.stop_loss >= old_sl, "SL must never move down!"
+    print(f"  ✅ SL monotonic: stays at {pos.stop_loss:.4f} (won't go back to 100.0)")
+
+    # Price drops to SL → CLOSED
     pos = pm.update(pos, pos.stop_loss - 0.01)
     assert pos.state == PositionState.CLOSED
     assert pos.pnl_usdt > 0  # should be profitable
     print(f"  ✅ SL hit: CLOSED, PnL=${pos.pnl_usdt:.2f} ({pos.close_reason})")
 
-    # Test SHORT position
+    # Test SHORT position with shadow trailing
     pos_short = LivePosition(
         symbol="ETHUSDT",
         direction=TradeDirection.SHORT,
@@ -212,17 +216,26 @@ def test_position_manager():
         entry_time=datetime.now(timezone.utc),
         quantity=0.5,
         risk_usdt=20.0,
-        stop_loss=3120.0,     # +4%
-        take_profit=2760.0,   # -8%
+        stop_loss=3120.0,     # +4% (2×ATR)
+        take_profit=2760.0,   # ext 1.618
         initial_stop_loss=3120.0,
         highest_price=3000.0,
         lowest_price=3000.0,
+        entry_atr=60.0,       # ATR at entry
     )
 
     # SHORT: price drops 1.6% → breakeven
-    pos_short = pm.update(pos_short, 2952.0)
+    pos_short = pm.update(pos_short, 2952.0, prev_candle_low=2940.0, prev_candle_high=2970.0)
     assert pos_short.state == PositionState.BREAKEVEN
-    print(f"  ✅ SHORT +1.6%: BREAKEVEN, SL={pos_short.stop_loss:.2f}")
+    print(f"  ✅ SHORT Phase 2: BREAKEVEN, SL={pos_short.stop_loss:.2f}")
+
+    # SHORT trailing: SL follows prev_candle_high + cushion
+    pos_short = pm.update(pos_short, 2890.0, prev_candle_low=2880.0, prev_candle_high=2920.0)
+    pos_short = pm.update(pos_short, 2870.0, prev_candle_low=2860.0, prev_candle_high=2900.0)
+    expected_short_sl = 2900.0 + (60.0 * config.TRAILING_ATR_CUSHION)  # 2900 + 12 = 2912
+    assert pos_short.state == PositionState.TRAILING
+    assert pos_short.stop_loss <= expected_short_sl + 0.01
+    print(f"  ✅ SHORT Shadow: SL={pos_short.stop_loss:.2f} (prev_high based)")
 
 
 def test_compound_calculator():
@@ -282,7 +295,6 @@ def test_single_entry_lock():
     print("  TEST 5: Single-Entry Lock (Anti-Pyramid)")
     print("─" * 60)
 
-    # Simulate the bot's occupied symbols check
     open_positions = [
         LivePosition(
             symbol="SANDUSDT",
@@ -316,19 +328,15 @@ def test_single_entry_lock():
     for pend in pending_orders:
         occupied.add(pend.symbol)
 
-    # SAND should be blocked (open position)
     assert "SANDUSDT" in occupied
     print(f"  ✅ SANDUSDT blocked: already has open position")
 
-    # BTC should be blocked (pending order)
     assert "BTCUSDT" in occupied
     print(f"  ✅ BTCUSDT blocked: pending limit order exists")
 
-    # ETH should be allowed
     assert "ETHUSDT" not in occupied
     print(f"  ✅ ETHUSDT allowed: no position or pending order")
 
-    # SOL should be allowed
     assert "SOLUSDT" not in occupied
     print(f"  ✅ SOLUSDT allowed: free to enter")
 
@@ -354,6 +362,7 @@ def test_trailing_with_reversal():
         initial_stop_loss=144.0,
         highest_price=155.0,
         lowest_price=150.0,
+        entry_atr=3.0,
     )
 
     # Already in profit
@@ -372,7 +381,7 @@ def test_trailing_with_reversal():
 def test_config_integrity():
     """Test 7: Config values are sane."""
     print("\n" + "─" * 60)
-    print("  TEST 7: Configuration Integrity")
+    print("  TEST 7: Configuration Integrity (v4.2)")
     print("─" * 60)
 
     assert config.RSI_OVERSOLD < 30, "RSI oversold should be < 30"

@@ -1,8 +1,13 @@
 """
-Aegis-Quant-Lab v4.0 — Global Configuration
+Aegis-Quant-Lab v4.2 — Global Configuration
 ═══════════════════════════════════════════════
-Architecture: Fibonacci Reversal Sniper
-  Impulse → Fibo Pullback → Limit Order → Trail to Exhaustion
+Architecture: Fibonacci Reversal Sniper + Volume POC + Shadow Trailing
+
+v4.2 Upgrades:
+  - Volume Profile POC (Lazy Sniper: 1m precision after 15m signal)
+  - 3-Phase Trailing (ATR buffer → Breakeven → Shadow-based trailing)
+  - Maker exits (dynamic limit TP repositioning)
+  - SHORT fully supported (no directional bias)
 """
 
 import os
@@ -86,6 +91,15 @@ TAKER_FEE_RATE: float = 0.00055      # 0.055% per side (Bybit VIP0 Taker)
 ROUNDTRIP_FEE_MAKER: float = 0.0004  # 0.04% total roundtrip (maker both sides)
 
 # ──────────────────────────────────────────────
+# Component 2b: Volume Profile POC (Lazy Sniper)
+# ──────────────────────────────────────────────
+# After 15m signal fires, fetch 1m data for precision entry
+POC_ENABLED: bool = True              # enable Volume Profile targeting
+POC_1M_LOOKBACK: int = 60            # 1m bars to fetch (= 1 hour of micro-structure)
+POC_CLUSTER_WIDTH_ATR: float = 0.3   # VWAP cluster width = 0.3 × ATR14
+POC_WEIGHT_VS_FIBO: float = 0.6     # 60% POC + 40% Fibo blend (0=pure Fibo, 1=pure POC)
+
+# ──────────────────────────────────────────────
 # Component 3: Single-Entry Lock (Anti-Pyramid)
 # ──────────────────────────────────────────────
 MAX_CONCURRENT_POSITIONS: int = 5    # max simultaneous open positions
@@ -93,22 +107,37 @@ MAX_ENTRIES_PER_CYCLE: int = 3       # don't enter more than 3 per scan
 # Rule: 1 symbol = 1 position. No averaging, no grid, no pyramiding.
 
 # ──────────────────────────────────────────────
-# Component 4: Trailing to Exhaustion
+# Component 4: 3-Phase Position Management (v4.2)
 # ──────────────────────────────────────────────
-# Breakeven
+
+# Phase 1: "Breathing Room" (initial buffer — don't touch SL)
+# SL set at entry - 2×ATR. No movement until breakeven triggers.
+SL_ATR_MULTIPLIER: float = 2.0       # initial SL distance = 2 × ATR
+
+# Phase 2: Breakeven
 BREAKEVEN_TRIGGER_PCT: float = 0.015  # +1.5% → move SL to entry + fees
 BREAKEVEN_FEE_BUFFER: float = 0.0004  # add maker roundtrip fee to breakeven SL
 
-# Trailing stop
+# Phase 3: Shadow-based Trailing (candle-low tracking)
 TRAILING_TRIGGER_PCT: float = 0.030   # +3.0% → activate trailing
-TRAILING_DISTANCE_PCT: float = 0.015  # trail 1.5% behind highest point
+TRAILING_DISTANCE_PCT: float = 0.015  # fallback: trail 1.5% behind peak
+TRAILING_ATR_CUSHION: float = 0.2     # cushion below prev candle low = 0.2 × ATR
+# Rule: new_sl = max(old_sl, prev_candle_low - cushion) for LONG
+#        new_sl = min(old_sl, prev_candle_high + cushion) for SHORT
 
-# Fibonacci extension targets (informational / partial exits)
-FIBO_EXT_1: float = 1.618            # first extension target
-FIBO_EXT_2: float = 2.618            # second extension target
+# Fibonacci extension targets
+FIBO_EXT_1: float = 1.618            # first extension target (primary TP)
+FIBO_EXT_2: float = 2.618            # second extension target (extended TP)
 
 # Exit on reversal: if oscillators flip to opposite extreme → close position
 EXIT_ON_REVERSAL: bool = True
+
+# ──────────────────────────────────────────────
+# Component 4b: Maker Exit (Limit Take-Profit)
+# ──────────────────────────────────────────────
+MAKER_EXIT_ENABLED: bool = True       # place limit TP instead of market close
+MAKER_TP_REPOSITION_TRIGGER: float = 0.8  # reposition TP when price reaches 80% of target
+# When trailing activates past ext_1.618, TP jumps to ext_2.618
 
 # ──────────────────────────────────────────────
 # Risk Management
