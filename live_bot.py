@@ -229,10 +229,11 @@ class LiveBot:
 
     def _manage_pending_orders(self):
         """
-        Check all pending limit orders:
-          - FILLED → register as open position
-          - TTL expired → cancel
-          - Price deviation > 1% → cancel (trend reversed)
+        Check all pending limit orders (CASCADE-aware):
+          - FILLED → register as open position (or merge with twin)
+          - TTL expired → cancel (and cancel twin if exists)
+          - Price deviation > 1% → cancel
+          - Twin logic: if both filled → merge into single position with avg price
         """
         if not self.pending_orders:
             return
@@ -240,6 +241,7 @@ class LiveBot:
         self.logger.info(f"\n  ⏳ Checking {len(self.pending_orders)} pending orders...")
 
         still_pending = []
+        filled_orders: list[PendingOrder] = []  # collect fills this cycle
         now = time.time()
 
         for order in self.pending_orders:
@@ -248,7 +250,8 @@ class LiveBot:
             # Check 1: TTL expired
             if elapsed > order.ttl_seconds:
                 self.logger.info(
-                    f"    ⌛ EXPIRED: {order.symbol} (TTL {order.ttl_seconds}s elapsed)"
+                    f"    ⌛ EXPIRED: {order.symbol} [{order.cascade_level}] "
+                    f"(TTL {order.ttl_seconds}s)"
                 )
                 self.connector.cancel_order(order.symbol, order.order_id)
                 continue
@@ -264,30 +267,16 @@ class LiveBot:
 
                     self.logger.info(
                         f"    ✅ FILLED: {order.symbol} {order.direction.value} "
-                        f"@ {fill_price:.6f} (waited {elapsed:.0f}s)"
+                        f"[{order.cascade_level}] @ {fill_price:.6f} ({elapsed:.0f}s)"
                     )
-
-                    # Register as open position
-                    pos = LivePosition(
-                        symbol=order.symbol,
-                        direction=order.direction,
-                        entry_price=fill_price,
-                        entry_time=datetime.now(timezone.utc),
-                        quantity=order.quantity,
-                        risk_usdt=order.risk_usdt,
-                        stop_loss=order.stop_loss,
-                        take_profit=order.take_profit,
-                        initial_stop_loss=order.stop_loss,
-                        highest_price=fill_price,
-                        lowest_price=fill_price,
-                        fibo_ext_1_price=order.fibo_ext_1,
-                        fibo_ext_2_price=order.fibo_ext_2,
-                    )
-                    self.open_positions.append(pos)
+                    order.limit_price = fill_price  # update with actual fill
+                    filled_orders.append(order)
                     continue
 
                 elif status in ("Cancelled", "Rejected", "Deactivated"):
-                    self.logger.info(f"    ❌ {status}: {order.symbol}")
+                    self.logger.info(
+                        f"    ❌ {status}: {order.symbol} [{order.cascade_level}]"
+                    )
                     continue
 
             # Check 3: Price deviation — cancel if price moved away
@@ -296,17 +285,102 @@ class LiveBot:
                 deviation = abs(current_price - order.limit_price) / order.limit_price
                 if deviation > order.max_deviation_pct:
                     self.logger.info(
-                        f"    📉 CANCEL: {order.symbol} | price deviated "
-                        f"{deviation*100:.2f}% > {order.max_deviation_pct*100:.1f}%"
+                        f"    📉 CANCEL: {order.symbol} [{order.cascade_level}] "
+                        f"deviation {deviation*100:.2f}%"
                     )
                     self.connector.cancel_order(order.symbol, order.order_id)
                     continue
 
             # Still pending
             still_pending.append(order)
-            self.logger.info(f"    ⏳ WAITING: {order.symbol} ({elapsed:.0f}s/{order.ttl_seconds}s)")
+            self.logger.info(
+                f"    ⏳ WAITING: {order.symbol} [{order.cascade_level}] "
+                f"({elapsed:.0f}s/{order.ttl_seconds}s)"
+            )
 
         self.pending_orders = still_pending
+
+        # ── Process filled orders: merge cascade twins ──
+        if not filled_orders:
+            return
+
+        # Group filled orders by cascade_group_id
+        groups: dict[str, list[PendingOrder]] = {}
+        for order in filled_orders:
+            gid = order.cascade_group_id or order.order_id
+            groups.setdefault(gid, []).append(order)
+
+        for group_id, group_orders in groups.items():
+            if len(group_orders) == 2:
+                # BOTH twins filled → merge into single position with avg price
+                o1, o2 = group_orders
+                total_qty = o1.quantity + o2.quantity
+                avg_entry = (
+                    (o1.limit_price * o1.quantity + o2.limit_price * o2.quantity)
+                    / total_qty
+                )
+                total_risk = o1.risk_usdt + o2.risk_usdt
+
+                # SL/TP from the deeper order (0.618)
+                sl = o2.stop_loss if o2.cascade_level == "0.618" else o1.stop_loss
+                tp = o1.take_profit  # both have same TP target
+
+                self.logger.info(
+                    f"    🔗 MERGED: {o1.symbol} | Avg entry: {avg_entry:.6f} "
+                    f"| Total qty: {total_qty}"
+                )
+
+                pos = LivePosition(
+                    symbol=o1.symbol,
+                    direction=o1.direction,
+                    entry_price=avg_entry,
+                    entry_time=datetime.now(timezone.utc),
+                    quantity=total_qty,
+                    risk_usdt=total_risk,
+                    stop_loss=sl,
+                    take_profit=tp,
+                    initial_stop_loss=sl,
+                    highest_price=avg_entry,
+                    lowest_price=avg_entry,
+                    fibo_ext_1_price=o1.fibo_ext_1,
+                    fibo_ext_2_price=o1.fibo_ext_2,
+                )
+                self.open_positions.append(pos)
+
+                # Cancel any remaining twin still pending
+                for pend in self.pending_orders[:]:
+                    if pend.cascade_group_id == group_id:
+                        self.connector.cancel_order(pend.symbol, pend.order_id)
+                        self.pending_orders.remove(pend)
+            else:
+                # Single fill (twin may still be pending or expired)
+                for order in group_orders:
+                    pos = LivePosition(
+                        symbol=order.symbol,
+                        direction=order.direction,
+                        entry_price=order.limit_price,
+                        entry_time=datetime.now(timezone.utc),
+                        quantity=order.quantity,
+                        risk_usdt=order.risk_usdt,
+                        stop_loss=order.stop_loss,
+                        take_profit=order.take_profit,
+                        initial_stop_loss=order.stop_loss,
+                        highest_price=order.limit_price,
+                        lowest_price=order.limit_price,
+                        fibo_ext_1_price=order.fibo_ext_1,
+                        fibo_ext_2_price=order.fibo_ext_2,
+                    )
+                    self.open_positions.append(pos)
+
+                    # Cancel the twin if still pending
+                    for pend in self.pending_orders[:]:
+                        if (pend.cascade_group_id == group_id
+                                and pend.order_id != order.order_id):
+                            self.logger.info(
+                                f"    🗑️ Cancel twin: {pend.symbol} [{pend.cascade_level}]"
+                            )
+                            self.connector.cancel_order(pend.symbol, pend.order_id)
+                            self.pending_orders.remove(pend)
 
     # ──────────────────────────────────────────────
     # POSITION MONITORING
@@ -419,111 +493,159 @@ class LiveBot:
 
     def _execute_entry(self, signal: ReversalSignal) -> bool:
         """
-        Execute entry based on reversal signal:
-          1. Calculate Fibo entry price
-          2. Calculate SL/TP
-          3. Calculate position size
-          4. Place LIMIT order (PostOnly)
-          5. Register as pending order
+        Execute entry using CASCADE Fibonacci Order Laddering (v4.1):
+          1. Calculate TWO Fibo entry prices (0.50 and 0.618)
+          2. Split risk 50/50 between the two levels
+          3. Place TWO LIMIT orders (PostOnly) as linked twins
+          4. Register both as pending with shared cascade_group_id
         """
+        import uuid
+
         symbol = signal.symbol
         direction = signal.direction
-
-        # ── Fibo entry price ──
-        fibo_entry = signal.fibo_entry_price
-
-        # ── SL/TP based on ATR ──
         atr = signal.atr_value
-        sl_distance = atr * 2.0  # 2x ATR stop loss
+        side = "Buy" if direction == TradeDirection.LONG else "Sell"
 
-        if direction == TradeDirection.LONG:
-            stop_loss = fibo_entry - sl_distance
-            take_profit = fibo_entry + sl_distance * config.RISK_REWARD_RATIO
-            side = "Buy"
-        else:
-            stop_loss = fibo_entry + sl_distance
-            take_profit = fibo_entry - sl_distance * config.RISK_REWARD_RATIO
-            side = "Sell"
+        # ── Calculate CASCADE entry prices with negative spread protection ──
+        entry_50, entry_618 = FiboCalculator.calculate_cascade_entries(
+            signal.swing_high, signal.swing_low, direction, signal.current_price
+        )
 
         # ── Fibo extensions (for trailing targets) ──
         ext_1, ext_2 = FiboCalculator.calculate_extensions(
             signal.swing_high, signal.swing_low, direction
         )
 
-        # ── Position size ──
-        size_info = self.compound.calculate_position_size(
-            entry_price=fibo_entry,
-            stop_loss_price=stop_loss,
-            leverage=self.leverage,
-        )
-        quantity = size_info["quantity"]
+        # ── SL/TP (calculated from the deeper 0.618 level) ──
+        sl_distance = atr * 2.0
+        if direction == TradeDirection.LONG:
+            stop_loss = entry_618 - sl_distance
+            take_profit = entry_50 + sl_distance * config.RISK_REWARD_RATIO
+        else:
+            stop_loss = entry_618 + sl_distance
+            take_profit = entry_50 - sl_distance * config.RISK_REWARD_RATIO
+
+        # ── Position sizes (split risk 50/50) ──
+        # Each leg gets half the total risk
+        half_risk_pct = self.compound.current_risk_pct * config.CASCADE_RISK_SPLIT
+
+        # Leg 1 (0.50 level)
+        sl_dist_50 = abs(entry_50 - stop_loss) / entry_50
+        if sl_dist_50 <= 0:
+            sl_dist_50 = 0.02
+        risk_usdt_50 = self.compound.current_balance * half_risk_pct
+        pos_value_50 = risk_usdt_50 / sl_dist_50
+        qty_50 = pos_value_50 / entry_50
+
+        # Leg 2 (0.618 level)
+        sl_dist_618 = abs(entry_618 - stop_loss) / entry_618
+        if sl_dist_618 <= 0:
+            sl_dist_618 = 0.02
+        risk_usdt_618 = self.compound.current_balance * half_risk_pct
+        pos_value_618 = risk_usdt_618 / sl_dist_618
+        qty_618 = pos_value_618 / entry_618
 
         # ── Precision ──
         precision = self.connector.get_lot_size_precision(symbol)
-        quantity = round(quantity, precision)
-        if quantity <= 0:
-            self.logger.warning(f"  ⚠️ {symbol} quantity too small")
+        qty_50 = round(qty_50, precision)
+        qty_618 = round(qty_618, precision)
+
+        if qty_50 <= 0 and qty_618 <= 0:
+            self.logger.warning(f"  ⚠️ {symbol} quantities too small")
             return False
 
         # ── Round prices to tick size ──
-        fibo_entry = self.connector.round_price(fibo_entry, symbol)
+        entry_50 = self.connector.round_price(entry_50, symbol)
+        entry_618 = self.connector.round_price(entry_618, symbol)
         stop_loss = self.connector.round_price(stop_loss, symbol)
         take_profit = self.connector.round_price(take_profit, symbol)
 
+        # ── Cascade group ID (links twin orders) ──
+        cascade_id = f"{symbol}_{uuid.uuid4().hex[:8]}"
+
         # ── Log entry details ──
         self.logger.info("")
-        self.logger.info(f"  ╔══════════════════════════════════════════════╗")
-        self.logger.info(f"  ║  NEW ENTRY: {direction.value} {symbol}")
-        self.logger.info(f"  ╠══════════════════════════════════════════════╣")
+        self.logger.info(f"  ╔══════════════════════════════════════════════════╗")
+        self.logger.info(f"  ║  CASCADE ENTRY: {direction.value} {symbol}")
+        self.logger.info(f"  ╠══════════════════════════════════════════════════╣")
         self.logger.info(f"  ║  Oscillators: {signal.oscillators_firing}/3 at extremes")
         self.logger.info(f"  ║  RSI={signal.rsi_value:.1f} | CCI={signal.cci_value:.0f} | W%R={signal.willr_value:.1f}")
-        self.logger.info(f"  ║  Market:  {signal.current_price:.6f}")
-        self.logger.info(f"  ║  Fibo Entry (0.618): {fibo_entry:.6f}")
-        discount_pct = abs(signal.current_price - fibo_entry) / signal.current_price * 100
-        self.logger.info(f"  ║  Discount: {discount_pct:.2f}% from market")
+        self.logger.info(f"  ║  Market:     {signal.current_price:.6f}")
+        self.logger.info(f"  ║  Leg 1 (0.50):  {entry_50:.6f} | Qty: {qty_50} | Risk: ${risk_usdt_50:.2f}")
+        self.logger.info(f"  ║  Leg 2 (0.618): {entry_618:.6f} | Qty: {qty_618} | Risk: ${risk_usdt_618:.2f}")
         self.logger.info(f"  ║  SL: {stop_loss:.6f} | TP: {take_profit:.6f}")
-        self.logger.info(f"  ║  Qty: {quantity} | Risk: ${size_info['risk_usdt']:.2f}")
         self.logger.info(f"  ║  Fibo Ext: 1.618={ext_1:.6f} | 2.618={ext_2:.6f}")
         self.logger.info(f"  ║  TTL: {config.ORDER_TTL_SECONDS}s | PostOnly (Maker)")
-        self.logger.info(f"  ╚══════════════════════════════════════════════╝")
+        self.logger.info(f"  ╚══════════════════════════════════════════════════╝")
 
-        # ── Place limit order ──
-        order_result = self.connector.place_limit_order(
-            symbol=symbol,
-            side=side,
-            qty=quantity,
-            price=fibo_entry,
-            stop_loss=stop_loss,
-            take_profit=take_profit,
-        )
+        orders_placed = 0
 
-        if order_result is None:
-            self.logger.error(f"  ❌ Order FAILED for {symbol}")
-            return False
+        # ── Place Leg 1: 0.50 level (closer to market) ──
+        if qty_50 > 0:
+            result_50 = self.connector.place_limit_order(
+                symbol=symbol, side=side, qty=qty_50,
+                price=entry_50, stop_loss=stop_loss, take_profit=take_profit,
+            )
+            if result_50:
+                self.total_orders_placed += 1
+                orders_placed += 1
+                self.pending_orders.append(PendingOrder(
+                    symbol=symbol,
+                    order_id=result_50.get("orderId", ""),
+                    direction=direction,
+                    limit_price=entry_50,
+                    stop_loss=stop_loss,
+                    take_profit=take_profit,
+                    quantity=qty_50,
+                    risk_usdt=risk_usdt_50,
+                    placed_at=time.time(),
+                    swing_high=signal.swing_high,
+                    swing_low=signal.swing_low,
+                    fibo_ext_1=ext_1,
+                    fibo_ext_2=ext_2,
+                    cascade_group_id=cascade_id,
+                    cascade_level="0.50",
+                ))
+            else:
+                self.logger.error(f"  ❌ Leg 1 (0.50) FAILED for {symbol}")
 
-        self.total_orders_placed += 1
-        order_id = order_result.get("orderId", "")
+        # ── Place Leg 2: 0.618 level (deeper) ──
+        if qty_618 > 0:
+            result_618 = self.connector.place_limit_order(
+                symbol=symbol, side=side, qty=qty_618,
+                price=entry_618, stop_loss=stop_loss, take_profit=take_profit,
+            )
+            if result_618:
+                self.total_orders_placed += 1
+                orders_placed += 1
+                self.pending_orders.append(PendingOrder(
+                    symbol=symbol,
+                    order_id=result_618.get("orderId", ""),
+                    direction=direction,
+                    limit_price=entry_618,
+                    stop_loss=stop_loss,
+                    take_profit=take_profit,
+                    quantity=qty_618,
+                    risk_usdt=risk_usdt_618,
+                    placed_at=time.time(),
+                    swing_high=signal.swing_high,
+                    swing_low=signal.swing_low,
+                    fibo_ext_1=ext_1,
+                    fibo_ext_2=ext_2,
+                    cascade_group_id=cascade_id,
+                    cascade_level="0.618",
+                ))
+            else:
+                self.logger.error(f"  ❌ Leg 2 (0.618) FAILED for {symbol}")
 
-        # ── Register as pending ──
-        pending = PendingOrder(
-            symbol=symbol,
-            order_id=order_id,
-            direction=direction,
-            limit_price=fibo_entry,
-            stop_loss=stop_loss,
-            take_profit=take_profit,
-            quantity=quantity,
-            risk_usdt=size_info["risk_usdt"],
-            placed_at=time.time(),
-            swing_high=signal.swing_high,
-            swing_low=signal.swing_low,
-            fibo_ext_1=ext_1,
-            fibo_ext_2=ext_2,
-        )
-        self.pending_orders.append(pending)
+        if orders_placed > 0:
+            self.logger.info(
+                f"  >>> {orders_placed} cascade order(s) placed "
+                f"(TTL={config.ORDER_TTL_SECONDS}s)"
+            )
+            return True
 
-        self.logger.info(f"  >>> Limit order placed — waiting for fill (TTL={config.ORDER_TTL_SECONDS}s)")
-        return True
+        return False
 
     # ──────────────────────────────────────────────
     # DASHBOARD

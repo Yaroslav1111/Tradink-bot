@@ -108,6 +108,9 @@ class PendingOrder:
     swing_low: float = 0.0
     fibo_ext_1: float = 0.0
     fibo_ext_2: float = 0.0
+    # Cascade twin tracking
+    cascade_group_id: str = ""       # shared ID linking twin orders
+    cascade_level: str = ""          # "0.50" or "0.618"
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -230,7 +233,7 @@ class FiboCalculator:
     """
     Computes Fibonacci retracement and extension levels.
 
-    Entry: 0.618 retracement of the recent impulse swing.
+    v4.1: CASCADE MODE — two entry levels (0.50 and 0.618).
     Extensions: 1.618 and 2.618 for trailing TP targets.
     """
 
@@ -240,22 +243,64 @@ class FiboCalculator:
     ) -> float:
         """
         Calculate the 0.618 Fibonacci retracement entry price.
-
-        LONG:  entry = swing_high - (range * 0.618)  → buy on pullback from high
-        SHORT: entry = swing_low + (range * 0.618)   → sell on bounce from low
+        (Legacy single-entry for compatibility)
         """
         diff = swing_high - swing_low
         if diff <= 0:
-            return (swing_high + swing_low) / 2  # fallback: midpoint
+            return (swing_high + swing_low) / 2
 
         fib_level = config.FIBO_LEVEL_PRIMARY  # 0.618
 
         if direction == TradeDirection.LONG:
-            # Expecting price to pull back DOWN from high → enter on 61.8% retracement
             return swing_high - (diff * fib_level)
         else:
-            # Expecting price to pull back UP from low → enter on 61.8% retracement
             return swing_low + (diff * fib_level)
+
+    @staticmethod
+    def calculate_cascade_entries(
+        swing_high: float, swing_low: float, direction: TradeDirection,
+        current_price: float,
+    ) -> tuple[float, float]:
+        """
+        Calculate CASCADE entry prices (Order Laddering).
+
+        Returns (entry_50, entry_618):
+          - entry_50:  50% retracement (closer to market, catches V-reversals)
+          - entry_618: 61.8% retracement (deeper, golden ratio)
+
+        Includes NEGATIVE SPREAD PROTECTION:
+          - LONG:  if limit_price > current_price → clamp to current - 0.1%
+          - SHORT: if limit_price < current_price → clamp to current + 0.1%
+        """
+        diff = swing_high - swing_low
+        if diff <= 0:
+            mid = (swing_high + swing_low) / 2
+            return mid, mid
+
+        if direction == TradeDirection.LONG:
+            entry_50 = swing_high - (diff * config.FIBO_LEVEL_SECONDARY)   # 0.50
+            entry_618 = swing_high - (diff * config.FIBO_LEVEL_PRIMARY)    # 0.618
+
+            # NEGATIVE SPREAD FIX: limit buy must be BELOW current price
+            max_buy = current_price * 0.999  # at least 0.1% below market
+            entry_50 = min(entry_50, max_buy)
+            entry_618 = min(entry_618, max_buy)
+            # Ensure 618 is always deeper than 50
+            if entry_618 >= entry_50:
+                entry_618 = entry_50 * 0.998
+        else:
+            entry_50 = swing_low + (diff * config.FIBO_LEVEL_SECONDARY)    # 0.50
+            entry_618 = swing_low + (diff * config.FIBO_LEVEL_PRIMARY)     # 0.618
+
+            # NEGATIVE SPREAD FIX: limit sell must be ABOVE current price
+            min_sell = current_price * 1.001  # at least 0.1% above market
+            entry_50 = max(entry_50, min_sell)
+            entry_618 = max(entry_618, min_sell)
+            # Ensure 618 is always deeper than 50
+            if entry_618 <= entry_50:
+                entry_618 = entry_50 * 1.002
+
+        return entry_50, entry_618
 
     @staticmethod
     def calculate_extensions(
@@ -268,14 +313,12 @@ class FiboCalculator:
         """
         diff = swing_high - swing_low
         if diff <= 0:
-            return swing_high, swing_high  # fallback
+            return swing_high, swing_high
 
         if direction == TradeDirection.LONG:
-            # Extensions above swing_high
-            ext_1 = swing_high + diff * (config.FIBO_EXT_1 - 1)  # 1.618
-            ext_2 = swing_high + diff * (config.FIBO_EXT_2 - 1)  # 2.618
+            ext_1 = swing_high + diff * (config.FIBO_EXT_1 - 1)
+            ext_2 = swing_high + diff * (config.FIBO_EXT_2 - 1)
         else:
-            # Extensions below swing_low
             ext_1 = swing_low - diff * (config.FIBO_EXT_1 - 1)
             ext_2 = swing_low - diff * (config.FIBO_EXT_2 - 1)
 
@@ -722,13 +765,16 @@ class BybitConnector:
                 logger.info(f"  ✅ Limit order placed: {side} {symbol} @ {price}")
                 return result
             else:
-                # PostOnly rejected — try without it
+                # PostOnly rejected or other API error — log exact reason
+                ret_msg = resp.get("retMsg", "unknown")
+                ret_code = resp.get("retCode", -1)
                 logger.warning(
-                    f"  ⚠️ PostOnly rejected for {symbol}: {resp.get('retMsg')}"
+                    f"  ⚠️ Order rejected for {symbol}: "
+                    f"[{ret_code}] {ret_msg}"
                 )
                 return None
         except Exception as e:
-            logger.error(f"  ❌ Order placement error: {e}")
+            logger.error(f"  ❌ Order placement error for {symbol}: {e}")
             return None
 
     def place_market_order(

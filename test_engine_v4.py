@@ -378,18 +378,97 @@ def test_config_integrity():
     assert config.RSI_OVERSOLD < 30, "RSI oversold should be < 30"
     assert config.RSI_OVERBOUGHT > 70, "RSI overbought should be > 70"
     assert config.FIBO_LEVEL_PRIMARY == 0.618, "Primary Fibo should be 0.618"
-    assert config.ORDER_TTL_SECONDS == 240, "TTL should be 4 minutes"
+    assert config.ORDER_TTL_SECONDS == 600, "TTL should be 10 minutes"
     assert config.MAX_CONCURRENT_POSITIONS == 5
     assert config.MAKER_FEE_RATE < config.TAKER_FEE_RATE
     assert config.BREAKEVEN_TRIGGER_PCT > 0
     assert config.TRAILING_TRIGGER_PCT > config.BREAKEVEN_TRIGGER_PCT
     assert len(config.SYMBOLS) >= 40
+    assert config.CASCADE_ENABLED is True
+    assert config.CASCADE_RISK_SPLIT == 0.5
     print(f"  ✅ All config values valid")
     print(f"     RSI thresholds: {config.RSI_OVERSOLD}/{config.RSI_OVERBOUGHT}")
-    print(f"     Fibo level: {config.FIBO_LEVEL_PRIMARY}")
-    print(f"     TTL: {config.ORDER_TTL_SECONDS}s")
+    print(f"     Fibo levels: 0.50 + 0.618 (cascade)")
+    print(f"     TTL: {config.ORDER_TTL_SECONDS}s (10 min)")
     print(f"     Symbols: {len(config.SYMBOLS)}")
     print(f"     Maker fee: {config.MAKER_FEE_RATE*100:.3f}%")
+    print(f"     Cascade: enabled (split {config.CASCADE_RISK_SPLIT*100:.0f}%/{config.CASCADE_RISK_SPLIT*100:.0f}%)")
+
+
+def test_cascade_fibo():
+    """Test 8: Cascade Fibonacci Order Laddering."""
+    print("\n" + "─" * 60)
+    print("  TEST 8: Cascade Fibonacci (Order Laddering)")
+    print("─" * 60)
+
+    # LONG cascade: H=100, L=80, current=95
+    e50, e618 = FiboCalculator.calculate_cascade_entries(
+        100.0, 80.0, TradeDirection.LONG, current_price=95.0
+    )
+    # entry_50 = 100 - 20*0.50 = 90.0
+    # entry_618 = 100 - 20*0.618 = 87.64
+    assert abs(e50 - 90.0) < 0.01, f"Cascade LONG 0.50 wrong: {e50}"
+    assert abs(e618 - 87.64) < 0.01, f"Cascade LONG 0.618 wrong: {e618}"
+    assert e618 < e50, "0.618 must be deeper (lower) than 0.50 for LONG"
+    print(f"  ✅ LONG cascade: 0.50={e50:.2f}, 0.618={e618:.2f}")
+
+    # SHORT cascade: H=100, L=80, current=85
+    e50_s, e618_s = FiboCalculator.calculate_cascade_entries(
+        100.0, 80.0, TradeDirection.SHORT, current_price=85.0
+    )
+    # entry_50 = 80 + 20*0.50 = 90.0
+    # entry_618 = 80 + 20*0.618 = 92.36
+    assert abs(e50_s - 90.0) < 0.01, f"Cascade SHORT 0.50 wrong: {e50_s}"
+    assert abs(e618_s - 92.36) < 0.01, f"Cascade SHORT 0.618 wrong: {e618_s}"
+    assert e618_s > e50_s, "0.618 must be deeper (higher) than 0.50 for SHORT"
+    print(f"  ✅ SHORT cascade: 0.50={e50_s:.2f}, 0.618={e618_s:.2f}")
+
+
+def test_negative_spread_protection():
+    """Test 9: Negative spread fix (limit above market for LONG)."""
+    print("\n" + "─" * 60)
+    print("  TEST 9: Negative Spread Protection")
+    print("─" * 60)
+
+    # Scenario: price crashed to 60, but swing_high is still 100
+    # Raw Fibo 0.618 = 100 - 20*0.618 = 87.64 → ABOVE current price (60)!
+    e50, e618 = FiboCalculator.calculate_cascade_entries(
+        100.0, 80.0, TradeDirection.LONG, current_price=60.0
+    )
+    max_allowed = 60.0 * 0.999  # must be below market
+    assert e50 <= max_allowed, f"LONG limit {e50:.4f} above market cap {max_allowed:.4f}!"
+    assert e618 <= max_allowed, f"LONG limit {e618:.4f} above market cap!"
+    assert e618 < e50, "0.618 must still be deeper than 0.50"
+    print(f"  ✅ Crash scenario (market=60): limits clamped to {e50:.4f} / {e618:.4f}")
+    print(f"     (both below market cap {max_allowed:.4f})")
+
+    # SHORT: price pumped to 120, swing_low=80
+    # Raw 0.618 = 80 + 20*0.618 = 92.36 → BELOW current price (120) → OK normally
+    # But what if swing range is tiny? H=121, L=120, current=121.5
+    # Raw 0.50 = 120 + 1*0.50 = 120.5 → BELOW current 121.5 → BAD for SHORT
+    e50_s, e618_s = FiboCalculator.calculate_cascade_entries(
+        121.0, 120.0, TradeDirection.SHORT, current_price=121.5
+    )
+    min_allowed = 121.5 * 1.001
+    assert e50_s >= min_allowed, f"SHORT limit {e50_s:.4f} below market!"
+    assert e618_s >= min_allowed, f"SHORT 618 {e618_s:.4f} below market!"
+    print(f"  ✅ SHORT clamp (market=121.5): limits raised to {e50_s:.4f} / {e618_s:.4f}")
+
+
+def test_ttl_increased():
+    """Test 10: TTL is 600s (10 minutes)."""
+    print("\n" + "─" * 60)
+    print("  TEST 10: TTL = 600 seconds (10 min)")
+    print("─" * 60)
+
+    assert config.ORDER_TTL_SECONDS == 600
+    pending = PendingOrder(
+        symbol="TEST", order_id="x", direction=TradeDirection.LONG,
+        limit_price=100.0, stop_loss=96.0, take_profit=108.0,
+        quantity=1.0, risk_usdt=10.0, placed_at=0.0,
+    )
+    assert pending.ttl_seconds == 600
+    print(f"  ✅ Default TTL: {pending.ttl_seconds}s = {pending.ttl_seconds/60:.0f} minutes")
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -398,8 +477,8 @@ def test_config_integrity():
 
 if __name__ == "__main__":
     print("\n" + "=" * 70)
-    print("  AEGIS-QUANT-LAB v4.0 — TEST SUITE")
-    print("  Architecture: Fibonacci Reversal Sniper")
+    print("  AEGIS-QUANT-LAB v4.1 — TEST SUITE")
+    print("  Architecture: Fibonacci Reversal Sniper + Cascade Laddering")
     print("=" * 70)
 
     test_reversal_engine()
@@ -409,7 +488,10 @@ if __name__ == "__main__":
     test_single_entry_lock()
     test_trailing_with_reversal()
     test_config_integrity()
+    test_cascade_fibo()
+    test_negative_spread_protection()
+    test_ttl_increased()
 
     print("\n" + "=" * 70)
-    print("  🎉 ALL TESTS PASSED — v4.0 ready for deployment!")
+    print("  🎉 ALL 10 TESTS PASSED — v4.1 ready for deployment!")
     print("=" * 70 + "\n")
