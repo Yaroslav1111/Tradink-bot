@@ -557,11 +557,13 @@ class LiveBot:
 
     def _execute_entry(self, signal: ReversalSignal) -> bool:
         """
-        Execute entry using CASCADE Fibonacci Order Laddering (v4.1):
-          1. Calculate TWO Fibo entry prices (0.50 and 0.618)
-          2. Split risk 50/50 between the two levels
-          3. Place TWO LIMIT orders (PostOnly) as linked twins
-          4. Register both as pending with shared cascade_group_id
+        Execute entry using CASCADE Fibonacci Order Laddering + POC (v4.2):
+          1. Lazy Sniper: fetch 1m POC (Point of Control) from volume profile
+          2. Calculate TWO Fibo entry prices (0.50 and 0.618)
+          3. Blend Fibo prices toward POC if volume cluster detected
+          4. Split risk 50/50 between the two levels
+          5. Place TWO LIMIT orders (PostOnly) as linked twins
+          6. Register both as pending with shared cascade_group_id
         """
         import uuid
 
@@ -570,10 +572,23 @@ class LiveBot:
         atr = signal.atr_value
         side = "Buy" if direction == TradeDirection.LONG else "Sell"
 
+        # ── Lazy Sniper: Ищем полку объемов (POC) на 1m таймфрейме ──
+        poc_price = None
+        df_1m = self._fetch_1m_candles(symbol)
+        if df_1m is not None and len(df_1m) > 0:
+            poc_price = VolumeProfiler.calculate_poc(
+                df_1m, atr_15m=atr, direction=direction, current_price=signal.current_price
+            )
+
         # ── Calculate CASCADE entry prices with negative spread protection ──
         entry_50, entry_618 = FiboCalculator.calculate_cascade_entries(
             signal.swing_high, signal.swing_low, direction, signal.current_price
         )
+
+        # ── Смешиваем Фибоначчи с реальными объемами (если полка найдена) ──
+        if poc_price:
+            entry_50 = VolumeProfiler.blend_poc_with_fibo(poc_price, entry_50)
+            entry_618 = VolumeProfiler.blend_poc_with_fibo(poc_price, entry_618)
 
         # ── Fibo extensions (for trailing targets + Maker TP) ──
         ext_1, ext_2 = FiboCalculator.calculate_extensions(
