@@ -405,6 +405,230 @@ class TestStrategy(unittest.TestCase):
 
 
 # ══════════════════════════════════════════════════════════════════
+# TEST: Trend Invalidation Exit (SuperTrend)
+# ══════════════════════════════════════════════════════════════════
+
+class TestTrendInvalidation(unittest.TestCase):
+    """Test SuperTrend-based trend invalidation exit."""
+
+    def setUp(self):
+        self.cfg = StrategyConfig(
+            trend_invalidation_enabled=True,
+            supertrend_period=10,
+            supertrend_multiplier=3.0,
+            trend_confirm_bars=2,
+        )
+        self.strategy = FiboReversalStrategy(self.cfg, initial_balance=2000.0)
+
+    def test_supertrend_returns_series(self):
+        """SuperTrend returns a valid Series with +1/-1 values."""
+        df = make_ohlcv_df(200)
+        st = Indicators.supertrend(
+            df["high"], df["low"], df["close"],
+            period=10, multiplier=3.0,
+        )
+        self.assertIsNotNone(st)
+        self.assertEqual(len(st), 200)
+        # Valid values should be +1 or -1
+        valid = st.dropna()
+        self.assertTrue(len(valid) > 0)
+        unique_vals = set(valid.unique())
+        self.assertTrue(unique_vals.issubset({1.0, -1.0}))
+
+    def test_supertrend_none_insufficient_data(self):
+        """SuperTrend returns None when data is too short."""
+        df = make_ohlcv_df(5)
+        st = Indicators.supertrend(df["high"], df["low"], df["close"], period=10)
+        self.assertIsNone(st)
+
+    def test_supertrend_warmup_nan(self):
+        """First 'period' bars should be NaN."""
+        df = make_ohlcv_df(100)
+        st = Indicators.supertrend(df["high"], df["low"], df["close"], period=10)
+        self.assertTrue(st.iloc[:10].isna().all())
+        self.assertFalse(st.iloc[10:].isna().all())
+
+    def test_trend_invalidation_long_downtrend(self):
+        """LONG position exits when SuperTrend confirms downtrend."""
+        # Create strongly declining data
+        n = 100
+        np.random.seed(555)
+        timestamps = np.arange(n) * 900.0 + 1700000000
+        # Strong downtrend: starts at 100, drops to 60
+        prices = np.linspace(100, 60, n)
+        opens = prices.copy()
+        closes = prices - 0.5  # close below open in downtrend
+        highs = np.maximum(opens, closes) + 0.2
+        lows = np.minimum(opens, closes) - 0.2
+
+        df = pd.DataFrame({
+            "timestamp": timestamps,
+            "open": opens, "high": highs, "low": lows,
+            "close": closes,
+            "volume": np.ones(n) * 1000,
+        })
+
+        pos = Position(
+            symbol="BTCUSDT", direction=Direction.LONG,
+            entry_price=95.0, quantity=1.0, risk_usdt=20.0,
+            stop_loss=85.0, take_profit=115.0, initial_stop_loss=85.0,
+            highest_price=95.0, lowest_price=60.0,
+        )
+
+        result = self.strategy.check_trend_invalidation(pos, df)
+        # In a strong downtrend, LONG should be invalidated
+        self.assertTrue(result)
+
+    def test_trend_invalidation_long_uptrend_no_exit(self):
+        """LONG position does NOT exit during uptrend."""
+        n = 100
+        np.random.seed(666)
+        timestamps = np.arange(n) * 900.0 + 1700000000
+        # Strong uptrend
+        prices = np.linspace(100, 140, n)
+        opens = prices.copy()
+        closes = prices + 0.5
+        highs = np.maximum(opens, closes) + 0.3
+        lows = np.minimum(opens, closes) - 0.3
+
+        df = pd.DataFrame({
+            "timestamp": timestamps,
+            "open": opens, "high": highs, "low": lows,
+            "close": closes,
+            "volume": np.ones(n) * 1000,
+        })
+
+        pos = Position(
+            symbol="BTCUSDT", direction=Direction.LONG,
+            entry_price=100.0, quantity=1.0, risk_usdt=20.0,
+            stop_loss=90.0, take_profit=150.0, initial_stop_loss=90.0,
+            highest_price=140.0, lowest_price=100.0,
+        )
+
+        result = self.strategy.check_trend_invalidation(pos, df)
+        self.assertFalse(result)
+
+    def test_trend_invalidation_short_uptrend(self):
+        """SHORT position exits when SuperTrend confirms uptrend."""
+        n = 100
+        np.random.seed(777)
+        timestamps = np.arange(n) * 900.0 + 1700000000
+        # Strong uptrend: starts at 100, rises to 140
+        prices = np.linspace(100, 140, n)
+        opens = prices.copy()
+        closes = prices + 0.5
+        highs = np.maximum(opens, closes) + 0.2
+        lows = np.minimum(opens, closes) - 0.2
+
+        df = pd.DataFrame({
+            "timestamp": timestamps,
+            "open": opens, "high": highs, "low": lows,
+            "close": closes,
+            "volume": np.ones(n) * 1000,
+        })
+
+        pos = Position(
+            symbol="BTCUSDT", direction=Direction.SHORT,
+            entry_price=105.0, quantity=1.0, risk_usdt=20.0,
+            stop_loss=115.0, take_profit=90.0, initial_stop_loss=115.0,
+            highest_price=105.0, lowest_price=100.0,
+        )
+
+        result = self.strategy.check_trend_invalidation(pos, df)
+        self.assertTrue(result)
+
+    def test_trend_invalidation_disabled(self):
+        """No invalidation when feature is disabled."""
+        cfg = StrategyConfig(trend_invalidation_enabled=False)
+        strategy = FiboReversalStrategy(cfg)
+
+        n = 100
+        prices = np.linspace(100, 60, n)
+        opens = prices.copy()
+        closes = prices - 0.5
+        highs = np.maximum(opens, closes) + 0.2
+        lows = np.minimum(opens, closes) - 0.2
+        df = pd.DataFrame({
+            "timestamp": np.arange(n) * 900.0 + 1700000000,
+            "open": opens, "high": highs, "low": lows,
+            "close": closes,
+            "volume": np.ones(n) * 1000,
+        })
+
+        pos = Position(
+            symbol="BTCUSDT", direction=Direction.LONG,
+            entry_price=95.0, quantity=1.0, risk_usdt=20.0,
+            stop_loss=85.0, take_profit=115.0, initial_stop_loss=85.0,
+            highest_price=95.0, lowest_price=60.0,
+        )
+
+        result = strategy.check_trend_invalidation(pos, df)
+        self.assertFalse(result)
+
+    def test_update_position_with_trend_invalidation(self):
+        """update_position() closes immediately on trend_invalidated=True."""
+        pos = Position(
+            symbol="BTCUSDT", direction=Direction.LONG,
+            entry_price=100.0, quantity=1.0, risk_usdt=20.0,
+            stop_loss=90.0, take_profit=120.0, initial_stop_loss=90.0,
+            phase=PositionPhase.BREATHING,
+            highest_price=100.0, lowest_price=97.0,
+        )
+        # Even though price is above SL, trend invalidation forces exit
+        pos = self.strategy.update_position(
+            pos, 97.0, trend_invalidated=True
+        )
+        self.assertEqual(pos.phase, PositionPhase.CLOSED)
+        self.assertEqual(pos.close_reason, "TREND_INVALIDATION")
+        # PnL should reflect taker fee (market exit)
+        self.assertLess(pos.pnl_usdt, 0)  # Loss since price dropped
+
+    def test_update_position_trend_invalidation_priority(self):
+        """TREND_INVALIDATION fires even if price is above SL (hasn't hit SL yet)."""
+        pos = Position(
+            symbol="BTCUSDT", direction=Direction.LONG,
+            entry_price=100.0, quantity=1.0, risk_usdt=20.0,
+            stop_loss=85.0, take_profit=120.0, initial_stop_loss=85.0,
+            phase=PositionPhase.TRAILING,
+            highest_price=110.0, lowest_price=100.0,
+            highest_profit_pct=0.10,
+            entry_atr=2.0,
+        )
+        # Price is 95 (above SL of 85), but trend is broken
+        pos = self.strategy.update_position(
+            pos, 95.0, trend_invalidated=True
+        )
+        self.assertEqual(pos.phase, PositionPhase.CLOSED)
+        self.assertEqual(pos.close_reason, "TREND_INVALIDATION")
+
+    def test_taker_fee_on_trend_invalidation(self):
+        """TREND_INVALIDATION uses taker fee (market exit)."""
+        pos = Position(
+            symbol="BTCUSDT", direction=Direction.LONG,
+            entry_price=100.0, quantity=1.0, risk_usdt=20.0,
+            stop_loss=90.0, take_profit=120.0, initial_stop_loss=90.0,
+            phase=PositionPhase.BREATHING,
+            highest_price=100.0, lowest_price=100.0,
+        )
+        # Exit at entry = 0 raw PnL, only fees
+        pos = self.strategy.update_position(
+            pos, 100.0, trend_invalidated=True
+        )
+        # Fee = (100 + 100) * 1.0 * 0.00055 = 0.11 (taker)
+        expected_fee = 200 * 1.0 * self.cfg.taker_fee
+        self.assertAlmostEqual(pos.pnl_usdt, -expected_fee, places=4)
+
+    def test_config_params_in_strategy_config(self):
+        """All trend invalidation params are in StrategyConfig (optimizer can search)."""
+        from dataclasses import fields
+        field_names = {f.name for f in fields(StrategyConfig)}
+        self.assertIn("trend_invalidation_enabled", field_names)
+        self.assertIn("supertrend_period", field_names)
+        self.assertIn("supertrend_multiplier", field_names)
+        self.assertIn("trend_confirm_bars", field_names)
+
+
+# ══════════════════════════════════════════════════════════════════
 # TEST: SimBroker
 # ══════════════════════════════════════════════════════════════════
 

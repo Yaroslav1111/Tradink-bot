@@ -83,6 +83,12 @@ class StrategyConfig:
     maker_fee: float = 0.0002
     taker_fee: float = 0.00055
 
+    # Trend Invalidation Exit (SuperTrend-based emergency evacuation)
+    trend_invalidation_enabled: bool = True
+    supertrend_period: int = 10        # ATR period for SuperTrend
+    supertrend_multiplier: float = 3.0  # ATR multiplier for bands
+    trend_confirm_bars: int = 2         # consecutive bars against to confirm invalidation
+
 
 # ══════════════════════════════════════════════════════════════════
 # INDICATORS (pure math, no I/O)
@@ -120,6 +126,70 @@ class Indicators:
         tr3 = (low - prev_close).abs()
         tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
         return tr.rolling(window=length).mean()
+
+    @staticmethod
+    def supertrend(
+        high: pd.Series, low: pd.Series, close: pd.Series,
+        period: int = 10, multiplier: float = 3.0,
+    ) -> Optional[pd.Series]:
+        """
+        SuperTrend indicator — returns a Series of +1 (uptrend) / -1 (downtrend).
+
+        Logic:
+          - Upper band = HL2 + multiplier * ATR
+          - Lower band = HL2 - multiplier * ATR
+          - Trend flips when close crosses the band
+
+        Lightweight, ATR-based, binary output — ideal for trend invalidation.
+        """
+        n = len(close)
+        if n < period + 1:
+            return None
+
+        hl2 = (high + low) / 2.0
+
+        # ATR calculation (RMA / Wilder's smoothing)
+        prev_close = close.shift(1)
+        tr1 = high - low
+        tr2 = (high - prev_close).abs()
+        tr3 = (low - prev_close).abs()
+        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+        atr = tr.ewm(alpha=1.0 / period, min_periods=period, adjust=False).mean()
+
+        # Basic bands
+        basic_upper = hl2 + multiplier * atr
+        basic_lower = hl2 - multiplier * atr
+
+        # Final bands (with clamping logic)
+        close_vals = close.values.astype(float).copy()
+        upper_vals = basic_upper.values.astype(float).copy()
+        lower_vals = basic_lower.values.astype(float).copy()
+        dir_vals = np.ones(n, dtype=float)  # 1 = uptrend
+
+        for i in range(1, n):
+            # Clamp lower band: can only go UP in uptrend
+            if lower_vals[i] < lower_vals[i - 1] and close_vals[i - 1] > lower_vals[i - 1]:
+                lower_vals[i] = lower_vals[i - 1]
+
+            # Clamp upper band: can only go DOWN in downtrend
+            if upper_vals[i] > upper_vals[i - 1] and close_vals[i - 1] < upper_vals[i - 1]:
+                upper_vals[i] = upper_vals[i - 1]
+
+            # Direction logic
+            if dir_vals[i - 1] == 1:  # was uptrend
+                if close_vals[i] < lower_vals[i]:
+                    dir_vals[i] = -1  # flip to downtrend
+                else:
+                    dir_vals[i] = 1
+            else:  # was downtrend
+                if close_vals[i] > upper_vals[i]:
+                    dir_vals[i] = 1  # flip to uptrend
+                else:
+                    dir_vals[i] = -1
+
+        # Set NaN for warmup period
+        dir_vals[:period] = np.nan
+        return pd.Series(dir_vals, index=close.index)
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -467,10 +537,13 @@ class FiboReversalStrategy:
         prev_candle_low: float = 0.0,
         prev_candle_high: float = 0.0,
         reversal_against: bool = False,
+        trend_invalidated: bool = False,
     ) -> Position:
         """
         3-phase position management. Returns updated position.
         If pos.phase == CLOSED, the caller should finalize it.
+
+        trend_invalidated: if True, emergency market exit (TREND_INVALIDATION).
         """
         if pos.phase == PositionPhase.CLOSED:
             return pos
@@ -496,6 +569,10 @@ class FiboReversalStrategy:
             return self._close_position(pos, current_price, "Stop Loss hit")
         if pos.direction == Direction.SHORT and current_price >= pos.stop_loss:
             return self._close_position(pos, current_price, "Stop Loss hit")
+
+        # TREND INVALIDATION — emergency evacuation (any PnL state)
+        if trend_invalidated:
+            return self._close_position(pos, current_price, "TREND_INVALIDATION")
 
         # Reversal exit (only in profit)
         if reversal_against and unr_pct > 0:
@@ -542,7 +619,12 @@ class FiboReversalStrategy:
             raw = (exit_price - pos.entry_price) * pos.quantity
         else:
             raw = (pos.entry_price - exit_price) * pos.quantity
-        fees = (pos.entry_price + exit_price) * pos.quantity * self.cfg.maker_fee
+        # Market exits (TREND_INVALIDATION, Stop Loss) use taker fee; TP uses maker fee
+        if reason in ("TREND_INVALIDATION", "Stop Loss hit"):
+            fee_rate = self.cfg.taker_fee
+        else:
+            fee_rate = self.cfg.maker_fee
+        fees = (pos.entry_price + exit_price) * pos.quantity * fee_rate
         pos.pnl_usdt = raw - fees
         pos.phase = PositionPhase.CLOSED
         pos.close_reason = reason
@@ -576,6 +658,48 @@ class FiboReversalStrategy:
             if rsi_val < self.cfg.rsi_oversold: count += 1
             if willr_val < self.cfg.willr_oversold: count += 1
             return count >= 2
+
+    def check_trend_invalidation(self, pos: Position, df: pd.DataFrame) -> bool:
+        """
+        Check if the global trend has broken against our position.
+
+        Uses SuperTrend: if the last N bars (trend_confirm_bars) show
+        trend direction OPPOSITE to our position → evacuate immediately.
+
+        This catches slow trend reversals that oscillators miss
+        (RSI can sit at oversold for weeks in a strong downtrend).
+        """
+        if not self.cfg.trend_invalidation_enabled:
+            return False
+        if df is None or len(df) < self.cfg.supertrend_period + self.cfg.trend_confirm_bars + 1:
+            return False
+
+        close = df["close"].astype(float)
+        high = df["high"].astype(float)
+        low = df["low"].astype(float)
+
+        st = Indicators.supertrend(
+            high, low, close,
+            period=self.cfg.supertrend_period,
+            multiplier=self.cfg.supertrend_multiplier,
+        )
+        if st is None:
+            return False
+
+        # Check last N bars for confirmed trend against us
+        confirm_bars = self.cfg.trend_confirm_bars
+        recent = st.iloc[-confirm_bars:]
+
+        # All must be valid (not NaN)
+        if recent.isna().any():
+            return False
+
+        if pos.direction == Direction.LONG:
+            # LONG invalidated when SuperTrend shows DOWNTREND for N bars
+            return (recent == -1).all()
+        else:
+            # SHORT invalidated when SuperTrend shows UPTREND for N bars
+            return (recent == 1).all()
 
     def should_reposition_tp(self, pos: Position, current_price: float) -> bool:
         """Check if TP should jump from ext_1 to ext_2."""
