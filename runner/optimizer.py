@@ -5,17 +5,20 @@ Runs backtests with different StrategyConfig combinations.
 
 Key features:
   - Grid search over any config parameters
+  - Multi-symbol batch optimization (individual best params per coin)
   - Parallel execution via ProcessPoolExecutor
   - Results sorted by profit and drawdown
-  - Clean tabular output
+  - JSON export of best params per symbol (optimized_params.json)
 """
 from __future__ import annotations
 
 import itertools
+import json
 import logging
 import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import asdict, fields
+from pathlib import Path
 from typing import Optional
 
 import pandas as pd
@@ -270,3 +273,79 @@ class Optimizer:
             )
 
         print(f"{'═'*80}\n")
+
+    def get_best_params(self, df_results: pd.DataFrame) -> dict:
+        """
+        Extract the best (Top-1) parameter overrides from results.
+        Returns only the grid-searched params (not the full StrategyConfig).
+        """
+        if df_results.empty:
+            return {}
+
+        best_row = df_results.iloc[0]
+        params = {}
+        for key in self.param_grid.keys():
+            col = f"param_{key}"
+            if col in best_row:
+                val = best_row[col]
+                # Convert numpy types to Python native for JSON serialization
+                if hasattr(val, 'item'):
+                    val = val.item()
+                params[key] = val
+        return params
+
+    @staticmethod
+    def save_optimized_params(
+        results: dict[str, dict],
+        output_path: str = "optimized_params.json",
+    ):
+        """
+        Save best params per symbol to JSON.
+
+        Args:
+            results: {"BTCUSDT": {"fibo_primary": 0.786, ...}, "ETHUSDT": {...}}
+            output_path: path to save JSON file
+        """
+        # Ensure all values are JSON-serializable
+        clean = {}
+        for symbol, params in results.items():
+            clean[symbol] = {
+                k: v.item() if hasattr(v, 'item') else v
+                for k, v in params.items()
+            }
+
+        with open(output_path, "w") as f:
+            json.dump(clean, f, indent=2)
+
+        logger.info(f"💾 Saved optimized params for {len(clean)} symbols → {output_path}")
+
+    @staticmethod
+    def load_optimized_params(path: str = "optimized_params.json") -> dict[str, dict]:
+        """
+        Load optimized params from JSON file.
+        Returns: {"BTCUSDT": {"fibo_primary": 0.786, ...}, ...}
+        """
+        p = Path(path)
+        if not p.exists():
+            return {}
+        with open(p, "r") as f:
+            return json.load(f)
+
+    @staticmethod
+    def build_symbol_config(
+        symbol: str,
+        optimized_params: dict[str, dict],
+        base_config: Optional[StrategyConfig] = None,
+    ) -> StrategyConfig:
+        """
+        Build StrategyConfig for a specific symbol.
+        If symbol has optimized params → apply overrides.
+        Otherwise → return base config (defaults).
+        """
+        base = base_config or StrategyConfig()
+        if symbol not in optimized_params:
+            return base
+
+        base_dict = asdict(base)
+        base_dict.update(optimized_params[symbol])
+        return StrategyConfig(**base_dict)

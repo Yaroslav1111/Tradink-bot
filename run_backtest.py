@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 """
-v5.0 — Backtest Entry Point
+v5.2 — Backtest Entry Point
 ══════════════════════════════════
-Run: python run_backtest.py [--symbol BTCUSDT] [--days 30]
+Run: python run_backtest.py [--symbol BTCUSDT] [--days 30] [--use-optimized]
 
 Downloads historical data from Bybit and runs backtest.
 No API keys required for public kline data.
+
+Flags:
+  --use-optimized    Load per-symbol config from optimized_params.json
 """
 import argparse
 import logging
@@ -65,12 +68,22 @@ def fetch_historical_data(symbol: str, interval: str, limit: int) -> "pd.DataFra
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Aegis v5.0 Backtester")
+    parser = argparse.ArgumentParser(description="Aegis v5.2 Backtester")
     parser.add_argument("--symbol", default="BTCUSDT", help="Trading pair")
     parser.add_argument("--days", type=int, default=30, help="Days of history")
     parser.add_argument("--balance", type=float, default=2000.0, help="Initial balance")
     parser.add_argument("--leverage", type=float, default=5.0, help="Leverage")
     parser.add_argument("--warmup", type=int, default=100, help="Warmup bars")
+    parser.add_argument(
+        "--use-optimized",
+        action="store_true",
+        help="Load per-symbol config from optimized_params.json"
+    )
+    parser.add_argument(
+        "--optimized-path",
+        default="optimized_params.json",
+        help="Path to optimized params JSON"
+    )
     args = parser.parse_args()
 
     import pandas as pd
@@ -94,6 +107,21 @@ def main():
         df_1m = None
         logger.info("  (1m data insufficient, POC disabled)")
 
+    # Load optimized params if requested
+    optimized_params = None
+    if args.use_optimized:
+        optimized_params = BacktestRunner.load_optimized_params(args.optimized_path)
+        if optimized_params:
+            if args.symbol in optimized_params:
+                logger.info(
+                    f"📋 Using optimized params for {args.symbol}: "
+                    f"{list(optimized_params[args.symbol].keys())}"
+                )
+            else:
+                logger.info(f"📋 No optimized params for {args.symbol} — using defaults")
+        else:
+            logger.info(f"⚠️ optimized_params.json not found at {args.optimized_path}")
+
     # Config
     strategy_cfg = StrategyConfig()
     bt_cfg = BacktestConfig(
@@ -103,13 +131,15 @@ def main():
         warmup_bars=args.warmup,
     )
 
-    # Run backtest
-    runner = BacktestRunner(strategy_cfg, bt_cfg)
+    # Run backtest (with optional per-symbol overrides)
+    runner = BacktestRunner(strategy_cfg, bt_cfg, optimized_params=optimized_params)
     results = runner.run(df_15m, df_1m)
 
     # Print results
     print(f"\n{'═'*60}")
     print(f"  BACKTEST RESULTS — {args.symbol}")
+    if args.use_optimized and optimized_params and args.symbol in optimized_params:
+        print(f"  (using optimized parameters)")
     print(f"{'═'*60}")
     print(f"  Period:       {args.days} days ({len(df_15m)} bars)")
     print(f"  Balance:      {args.balance} → {results['final_balance']:.2f} USDT")

@@ -8,13 +8,16 @@ Key features:
   - Single-entry lock: checks exchange positions (not local JSON)
   - Cascade order management (place, TTL, merge on fill)
   - 3-phase position management with SL/TP sync to exchange
+  - Symbol-specific configuration from optimized_params.json
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 import time
 import uuid
+from pathlib import Path
 from typing import Optional
 
 import pandas as pd
@@ -46,6 +49,7 @@ class LiveRunner:
         scan_interval: int = 60,
         candle_interval: str = "15",
         candle_limit: int = 200,
+        optimized_params_path: str = "optimized_params.json",
     ):
         self.broker = broker
         self.strategy = strategy
@@ -55,6 +59,11 @@ class LiveRunner:
         self.candle_interval = candle_interval
         self.candle_limit = candle_limit
 
+        # Symbol-specific configs (loaded from optimized_params.json)
+        self._symbol_configs: dict[str, StrategyConfig] = {}
+        self._symbol_strategies: dict[str, FiboReversalStrategy] = {}
+        self._load_optimized_params(optimized_params_path)
+
         # Tracked state (recovered from exchange)
         self.active_orders: list[Order] = []
         self.active_positions: list[Position] = []
@@ -62,6 +71,45 @@ class LiveRunner:
 
         # Recover state from exchange (Amnesia Fix)
         self._recover_state()
+
+    # ─────────────────── Symbol-Specific Config ───────────────────
+
+    def _load_optimized_params(self, path: str):
+        """Load per-symbol optimized parameters from JSON file."""
+        p = Path(path)
+        if not p.exists():
+            logger.info("📋 No optimized_params.json found — using default config for all symbols")
+            return
+
+        try:
+            with open(p, "r") as f:
+                params_data = json.load(f)
+
+            from dataclasses import asdict
+            base_dict = asdict(self.cfg)
+
+            count = 0
+            for symbol, overrides in params_data.items():
+                merged = {**base_dict, **overrides}
+                cfg = StrategyConfig(**merged)
+                self._symbol_configs[symbol] = cfg
+                self._symbol_strategies[symbol] = FiboReversalStrategy(
+                    cfg, initial_balance=self.strategy.compound.balance
+                )
+                count += 1
+
+            logger.info(f"📋 Loaded optimized params for {count} symbols from {path}")
+
+        except Exception as e:
+            logger.warning(f"⚠️ Failed to load optimized_params.json: {e}")
+
+    def _get_strategy_for_symbol(self, symbol: str) -> FiboReversalStrategy:
+        """Get the strategy instance for a specific symbol (optimized or default)."""
+        return self._symbol_strategies.get(symbol, self.strategy)
+
+    def _get_config_for_symbol(self, symbol: str) -> StrategyConfig:
+        """Get the config for a specific symbol (optimized or default)."""
+        return self._symbol_configs.get(symbol, self.cfg)
 
     # ─────────────────── Amnesia Fix ───────────────────
 
@@ -152,8 +200,12 @@ class LiveRunner:
         if current_price <= 0:
             return None
 
+        # Use per-symbol strategy (optimized or default)
+        strategy = self._get_strategy_for_symbol(symbol)
+        cfg = self._get_config_for_symbol(symbol)
+
         # Detect signal direction
-        direction = self.strategy.detect_signal(symbol, df_15m, current_price)
+        direction = strategy.detect_signal(symbol, df_15m, current_price)
         if direction is None:
             return None
 
@@ -161,11 +213,11 @@ class LiveRunner:
 
         # Get 1m data for POC
         df_1m = None
-        if self.cfg.poc_enabled:
-            df_1m = self.broker.get_klines(symbol, "1", self.cfg.poc_1m_lookback)
+        if cfg.poc_enabled:
+            df_1m = self.broker.get_klines(symbol, "1", cfg.poc_1m_lookback)
 
         # Build full signal with sizing
-        signal = self.strategy.build_signal(
+        signal = strategy.build_signal(
             symbol, direction, df_15m, df_1m, current_price, account
         )
         return signal
@@ -337,6 +389,9 @@ class LiveRunner:
             if current_price <= 0:
                 continue
 
+            # Use per-symbol strategy (optimized or default)
+            strategy = self._get_strategy_for_symbol(pos.symbol)
+
             # Get previous candle for shadow trailing
             df = self.broker.get_klines(pos.symbol, self.candle_interval, 3)
             prev_low = 0.0
@@ -347,15 +402,15 @@ class LiveRunner:
 
             # Check oscillator reversal
             df_full = self.broker.get_klines(pos.symbol, self.candle_interval, self.candle_limit)
-            reversal = self.strategy.check_reversal_against(pos, df_full) if df_full is not None else False
+            reversal = strategy.check_reversal_against(pos, df_full) if df_full is not None else False
 
             # Check trend invalidation (SuperTrend-based emergency exit)
-            trend_invalidated = self.strategy.check_trend_invalidation(pos, df_full) if df_full is not None else False
+            trend_invalidated = strategy.check_trend_invalidation(pos, df_full) if df_full is not None else False
 
             # Update position (phase transitions, trailing)
             old_sl = pos.stop_loss
             old_tp = pos.take_profit
-            pos = self.strategy.update_position(
+            pos = strategy.update_position(
                 pos, current_price, prev_low, prev_high, reversal, trend_invalidated
             )
 
@@ -363,7 +418,7 @@ class LiveRunner:
             if pos.phase == PositionPhase.CLOSED:
                 close_side = "Sell" if pos.direction == Direction.LONG else "Buy"
                 self.broker.close_position(pos.symbol, pos.quantity, close_side)
-                self.strategy.compound.record(pos.pnl_usdt)
+                strategy.compound.record(pos.pnl_usdt)
                 self.active_positions.remove(pos)
                 logger.info(
                     f"  🔒 Position closed: {pos.symbol} | "
@@ -376,7 +431,7 @@ class LiveRunner:
             tp_changed = abs(pos.take_profit - old_tp) > 0.0001
 
             # TP Repositioning check
-            if self.strategy.should_reposition_tp(pos, current_price):
+            if strategy.should_reposition_tp(pos, current_price):
                 pos.take_profit = pos.fibo_ext_2
                 pos.tp_repositioned = True
                 tp_changed = True

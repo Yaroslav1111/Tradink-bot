@@ -933,6 +933,295 @@ class TestIntegration(unittest.TestCase):
 
 
 # ══════════════════════════════════════════════════════════════════
+# SYMBOL-SPECIFIC CONFIGURATION TESTS
+# ══════════════════════════════════════════════════════════════════
+
+class TestSymbolSpecificConfig(unittest.TestCase):
+    """Tests for per-symbol optimized parameter system."""
+
+    def test_optimizer_get_best_params(self):
+        """Optimizer.get_best_params() extracts top-1 overrides from results."""
+        from runner.optimizer import Optimizer
+
+        param_grid = {
+            "fibo_primary": [0.5, 0.618, 0.786],
+            "sl_atr_multiplier": [1.5, 2.0],
+        }
+        optimizer = Optimizer(param_grid=param_grid)
+
+        # Simulate results DataFrame
+        rows = [
+            {"total_pnl": 100, "return_pct": 5, "max_drawdown_pct": 3,
+             "total_trades": 10, "win_rate": 60, "profit_factor": 2.0,
+             "final_balance": 2100, "avg_trade_pnl": 10,
+             "param_fibo_primary": 0.786, "param_sl_atr_multiplier": 1.5},
+            {"total_pnl": 50, "return_pct": 2.5, "max_drawdown_pct": 5,
+             "total_trades": 8, "win_rate": 55, "profit_factor": 1.5,
+             "final_balance": 2050, "avg_trade_pnl": 6.25,
+             "param_fibo_primary": 0.618, "param_sl_atr_multiplier": 2.0},
+        ]
+        df = pd.DataFrame(rows)
+
+        best = optimizer.get_best_params(df)
+        self.assertEqual(best["fibo_primary"], 0.786)
+        self.assertEqual(best["sl_atr_multiplier"], 1.5)
+
+    def test_optimizer_save_and_load_params(self):
+        """save_optimized_params() writes JSON and load reads it back."""
+        import tempfile
+        from runner.optimizer import Optimizer
+
+        params = {
+            "BTCUSDT": {"fibo_primary": 0.786, "sl_atr_multiplier": 1.5},
+            "ETHUSDT": {"fibo_primary": 0.618, "sl_atr_multiplier": 2.0},
+        }
+
+        with tempfile.NamedTemporaryFile(suffix=".json", delete=False, mode="w") as f:
+            tmp_path = f.name
+
+        try:
+            Optimizer.save_optimized_params(params, tmp_path)
+            loaded = Optimizer.load_optimized_params(tmp_path)
+
+            self.assertEqual(loaded["BTCUSDT"]["fibo_primary"], 0.786)
+            self.assertEqual(loaded["ETHUSDT"]["sl_atr_multiplier"], 2.0)
+            self.assertEqual(len(loaded), 2)
+        finally:
+            os.unlink(tmp_path)
+
+    def test_optimizer_load_nonexistent_returns_empty(self):
+        """load_optimized_params() returns empty dict if file doesn't exist."""
+        from runner.optimizer import Optimizer
+
+        result = Optimizer.load_optimized_params("/tmp/nonexistent_test_file_xyz.json")
+        self.assertEqual(result, {})
+
+    def test_build_symbol_config_with_overrides(self):
+        """build_symbol_config() applies overrides for known symbols."""
+        from runner.optimizer import Optimizer
+
+        optimized = {
+            "BTCUSDT": {"fibo_primary": 0.786, "sl_atr_multiplier": 1.5},
+        }
+        base = StrategyConfig()  # fibo_primary=0.618 by default
+
+        cfg = Optimizer.build_symbol_config("BTCUSDT", optimized, base)
+        self.assertEqual(cfg.fibo_primary, 0.786)
+        self.assertEqual(cfg.sl_atr_multiplier, 1.5)
+        # Non-overridden params stay default
+        self.assertEqual(cfg.fibo_secondary, base.fibo_secondary)
+
+    def test_build_symbol_config_unknown_symbol_uses_defaults(self):
+        """build_symbol_config() returns base config for unknown symbol."""
+        from runner.optimizer import Optimizer
+
+        optimized = {
+            "BTCUSDT": {"fibo_primary": 0.786},
+        }
+        base = StrategyConfig()
+
+        cfg = Optimizer.build_symbol_config("XLMUSDT", optimized, base)
+        self.assertEqual(cfg.fibo_primary, base.fibo_primary)
+        self.assertEqual(cfg.sl_atr_multiplier, base.sl_atr_multiplier)
+
+    def test_backtest_runner_with_optimized_params(self):
+        """BacktestRunner applies per-symbol optimized config."""
+        from runner.backtest_runner import BacktestRunner, BacktestConfig
+
+        optimized = {
+            "BTCUSDT": {"fibo_primary": 0.786, "sl_atr_multiplier": 1.5},
+        }
+
+        bt_cfg = BacktestConfig(symbol="BTCUSDT", initial_balance=2000.0)
+        runner = BacktestRunner(StrategyConfig(), bt_cfg, optimized_params=optimized)
+
+        # Verify the runner applied the overrides
+        self.assertEqual(runner.strategy_cfg.fibo_primary, 0.786)
+        self.assertEqual(runner.strategy_cfg.sl_atr_multiplier, 1.5)
+        # Strategy was created with overridden config
+        self.assertEqual(runner.strategy.cfg.fibo_primary, 0.786)
+
+    def test_backtest_runner_without_optimized_params(self):
+        """BacktestRunner uses defaults when no optimized params."""
+        from runner.backtest_runner import BacktestRunner, BacktestConfig
+
+        bt_cfg = BacktestConfig(symbol="BTCUSDT", initial_balance=2000.0)
+        runner = BacktestRunner(StrategyConfig(), bt_cfg, optimized_params=None)
+
+        self.assertEqual(runner.strategy_cfg.fibo_primary, 0.618)  # default
+        self.assertEqual(runner.strategy_cfg.sl_atr_multiplier, 2.0)  # default
+
+    def test_backtest_runner_symbol_not_in_optimized(self):
+        """BacktestRunner uses defaults when symbol not in optimized dict."""
+        from runner.backtest_runner import BacktestRunner, BacktestConfig
+
+        optimized = {
+            "ETHUSDT": {"fibo_primary": 0.786},
+        }
+
+        bt_cfg = BacktestConfig(symbol="BTCUSDT", initial_balance=2000.0)
+        runner = BacktestRunner(StrategyConfig(), bt_cfg, optimized_params=optimized)
+
+        # BTCUSDT not in optimized → should use default
+        self.assertEqual(runner.strategy_cfg.fibo_primary, 0.618)
+
+    def test_backtest_runner_load_optimized_params_static(self):
+        """BacktestRunner.load_optimized_params() reads JSON correctly."""
+        import tempfile
+        import json
+        from runner.backtest_runner import BacktestRunner
+
+        params = {"SOLUSDT": {"fibo_primary": 0.5, "order_ttl_seconds": 300}}
+
+        with tempfile.NamedTemporaryFile(suffix=".json", delete=False, mode="w") as f:
+            json.dump(params, f)
+            tmp_path = f.name
+
+        try:
+            loaded = BacktestRunner.load_optimized_params(tmp_path)
+            self.assertEqual(loaded["SOLUSDT"]["fibo_primary"], 0.5)
+            self.assertEqual(loaded["SOLUSDT"]["order_ttl_seconds"], 300)
+        finally:
+            os.unlink(tmp_path)
+
+    def test_live_runner_get_strategy_for_symbol(self):
+        """LiveRunner._get_strategy_for_symbol() returns per-symbol or default."""
+        import tempfile
+        import json
+        from unittest.mock import MagicMock, patch
+        from runner.live_runner import LiveRunner
+
+        # Create mock broker that returns empty lists for recovery
+        mock_broker = MagicMock()
+        mock_broker.get_positions.return_value = []
+        mock_broker.get_pending_orders.return_value = []
+
+        # Create temp optimized_params.json
+        params = {"BTCUSDT": {"fibo_primary": 0.786, "sl_atr_multiplier": 1.5}}
+        with tempfile.NamedTemporaryFile(suffix=".json", delete=False, mode="w") as f:
+            json.dump(params, f)
+            tmp_path = f.name
+
+        try:
+            strategy = FiboReversalStrategy(StrategyConfig(), initial_balance=2000.0)
+            runner = LiveRunner(
+                broker=mock_broker,
+                strategy=strategy,
+                symbols=["BTCUSDT", "ETHUSDT"],
+                optimized_params_path=tmp_path,
+            )
+
+            # BTCUSDT should get custom strategy
+            btc_strategy = runner._get_strategy_for_symbol("BTCUSDT")
+            self.assertEqual(btc_strategy.cfg.fibo_primary, 0.786)
+            self.assertEqual(btc_strategy.cfg.sl_atr_multiplier, 1.5)
+
+            # ETHUSDT should get default strategy
+            eth_strategy = runner._get_strategy_for_symbol("ETHUSDT")
+            self.assertEqual(eth_strategy.cfg.fibo_primary, 0.618)  # default
+            self.assertIs(eth_strategy, strategy)  # same object as default
+        finally:
+            os.unlink(tmp_path)
+
+    def test_live_runner_no_optimized_file(self):
+        """LiveRunner works fine when optimized_params.json doesn't exist."""
+        from unittest.mock import MagicMock
+        from runner.live_runner import LiveRunner
+
+        mock_broker = MagicMock()
+        mock_broker.get_positions.return_value = []
+        mock_broker.get_pending_orders.return_value = []
+
+        strategy = FiboReversalStrategy(StrategyConfig(), initial_balance=2000.0)
+        runner = LiveRunner(
+            broker=mock_broker,
+            strategy=strategy,
+            symbols=["BTCUSDT"],
+            optimized_params_path="/tmp/nonexistent_params_xyz.json",
+        )
+
+        # Should fallback to default for all symbols
+        self.assertEqual(len(runner._symbol_configs), 0)
+        self.assertEqual(len(runner._symbol_strategies), 0)
+
+        # All symbols should get the default strategy
+        s = runner._get_strategy_for_symbol("BTCUSDT")
+        self.assertIs(s, strategy)
+
+    def test_live_runner_get_config_for_symbol(self):
+        """LiveRunner._get_config_for_symbol() returns correct configs."""
+        import tempfile
+        import json
+        from unittest.mock import MagicMock
+        from runner.live_runner import LiveRunner
+
+        mock_broker = MagicMock()
+        mock_broker.get_positions.return_value = []
+        mock_broker.get_pending_orders.return_value = []
+
+        params = {"SOLUSDT": {"sl_atr_multiplier": 2.5, "trailing_trigger_pct": 0.04}}
+        with tempfile.NamedTemporaryFile(suffix=".json", delete=False, mode="w") as f:
+            json.dump(params, f)
+            tmp_path = f.name
+
+        try:
+            base_cfg = StrategyConfig()
+            strategy = FiboReversalStrategy(base_cfg, initial_balance=2000.0)
+            runner = LiveRunner(
+                broker=mock_broker,
+                strategy=strategy,
+                symbols=["SOLUSDT", "BTCUSDT"],
+                optimized_params_path=tmp_path,
+            )
+
+            # SOLUSDT should have custom config
+            sol_cfg = runner._get_config_for_symbol("SOLUSDT")
+            self.assertEqual(sol_cfg.sl_atr_multiplier, 2.5)
+            self.assertEqual(sol_cfg.trailing_trigger_pct, 0.04)
+
+            # BTCUSDT should have default config
+            btc_cfg = runner._get_config_for_symbol("BTCUSDT")
+            self.assertEqual(btc_cfg.sl_atr_multiplier, 2.0)  # default
+            self.assertIs(btc_cfg, base_cfg)  # same object
+        finally:
+            os.unlink(tmp_path)
+
+    def test_optimizer_build_symbol_config_no_base(self):
+        """build_symbol_config() uses default StrategyConfig when base is None."""
+        from runner.optimizer import Optimizer
+
+        optimized = {"BTCUSDT": {"fibo_primary": 0.5}}
+        cfg = Optimizer.build_symbol_config("BTCUSDT", optimized, None)
+        self.assertEqual(cfg.fibo_primary, 0.5)
+        # Other fields from default
+        self.assertEqual(cfg.sl_atr_multiplier, 2.0)
+
+    def test_full_backtest_with_optimized_params(self):
+        """End-to-end: BacktestRunner with optimized params produces valid results."""
+        from runner.backtest_runner import BacktestRunner, BacktestConfig
+
+        df = make_ohlcv_df(300, base_price=100.0, seed=123)
+
+        optimized = {
+            "TESTUSDT": {"fibo_primary": 0.5, "sl_atr_multiplier": 1.5},
+        }
+
+        bt_cfg = BacktestConfig(symbol="TESTUSDT", initial_balance=2000.0)
+        runner = BacktestRunner(StrategyConfig(), bt_cfg, optimized_params=optimized)
+
+        # Verify config was applied
+        self.assertEqual(runner.strategy_cfg.fibo_primary, 0.5)
+        self.assertEqual(runner.strategy_cfg.sl_atr_multiplier, 1.5)
+
+        # Run backtest (should complete without errors)
+        results = runner.run(df)
+        self.assertIn("total_trades", results)
+        self.assertIn("total_pnl", results)
+        self.assertIn("final_balance", results)
+        self.assertGreater(results["final_balance"], 0)
+
+
+# ══════════════════════════════════════════════════════════════════
 # RUN
 # ══════════════════════════════════════════════════════════════════
 
