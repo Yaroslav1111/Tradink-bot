@@ -8,12 +8,15 @@ Key features:
   - Honest fills: via SimBroker (candle high/low crossing)
   - Same Strategy code as live — zero modifications
   - Fast: months of data in seconds
+  - Symbol-specific configuration from optimized_params.json
 """
 from __future__ import annotations
 
+import json
 import logging
 import time as time_module
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
+from pathlib import Path
 from typing import Optional
 
 import pandas as pd
@@ -46,15 +49,28 @@ class BacktestRunner:
 
     Uses the SAME FiboReversalStrategy as live trading.
     SimBroker handles fills with honest candle logic.
+    Supports per-symbol optimized config from optimized_params.json.
     """
 
     def __init__(
         self,
         strategy_cfg: StrategyConfig,
         backtest_cfg: BacktestConfig,
+        optimized_params: Optional[dict[str, dict]] = None,
     ):
         self.strategy_cfg = strategy_cfg
         self.bt_cfg = backtest_cfg
+
+        # If optimized params exist for this symbol, apply overrides
+        if optimized_params and backtest_cfg.symbol in optimized_params:
+            overrides = optimized_params[backtest_cfg.symbol]
+            base_dict = asdict(strategy_cfg)
+            base_dict.update(overrides)
+            self.strategy_cfg = StrategyConfig(**base_dict)
+            logger.info(
+                f"📋 Using optimized params for {backtest_cfg.symbol}: "
+                f"{list(overrides.keys())}"
+            )
 
         # Create components
         self.broker = SimBroker(
@@ -64,7 +80,7 @@ class BacktestRunner:
             taker_fee=backtest_cfg.taker_fee,
         )
         self.strategy = FiboReversalStrategy(
-            cfg=strategy_cfg,
+            cfg=self.strategy_cfg,
             initial_balance=backtest_cfg.initial_balance,
         )
 
@@ -299,3 +315,15 @@ class BacktestRunner:
                 "warmup_bars": self.bt_cfg.warmup_bars,
             },
         }
+
+    @staticmethod
+    def load_optimized_params(path: str = "optimized_params.json") -> dict[str, dict]:
+        """
+        Load optimized params from JSON file.
+        Returns: {"BTCUSDT": {"fibo_primary": 0.786, ...}, ...}
+        """
+        p = Path(path)
+        if not p.exists():
+            return {}
+        with open(p, "r") as f:
+            return json.load(f)
