@@ -349,11 +349,14 @@ class LiveRunner:
             df_full = self.broker.get_klines(pos.symbol, self.candle_interval, self.candle_limit)
             reversal = self.strategy.check_reversal_against(pos, df_full) if df_full is not None else False
 
+            # Check trend invalidation (SuperTrend-based emergency exit)
+            trend_invalidated = self.strategy.check_trend_invalidation(pos, df_full) if df_full is not None else False
+
             # Update position (phase transitions, trailing)
             old_sl = pos.stop_loss
             old_tp = pos.take_profit
             pos = self.strategy.update_position(
-                pos, current_price, prev_low, prev_high, reversal
+                pos, current_price, prev_low, prev_high, reversal, trend_invalidated
             )
 
             # Handle close
