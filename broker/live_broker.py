@@ -81,17 +81,22 @@ class LiveBroker:
                     unrealized = float(coin.get("unrealisedPnl", 0))
                     break
 
-            # Locked = total - available
+            # Locked = total - available (for display only)
             locked = max(0, usdt_balance - available)
 
-            # Pending margin from open limit orders
-            pending = self._calc_pending_margin()
+            # ⚠️ Bybit's totalAvailableBalance ALREADY excludes all locked margin
+            # (both from positions AND pending orders). Setting pending_margin=0
+            # prevents double-deduction in free_margin calculation.
+            # See engine/models.py AccountState.free_margin:
+            #   free_margin = available_balance - pending_margin
+            # If we set pending_margin to a real value here, it gets subtracted
+            # TWICE: once by Bybit (in totalAvailableBalance) and once by us.
 
             return AccountState(
                 total_balance=usdt_balance,
                 available_balance=available,
                 locked_margin=locked,
-                pending_margin=pending,
+                pending_margin=0.0,       # already factored into available_balance
                 unrealized_pnl=unrealized,
             )
         except Exception as e:
@@ -108,8 +113,9 @@ class LiveBroker:
                 return 0.0
             total = 0.0
             for o in resp["result"]["list"]:
-                price = float(o.get("price", 0))
-                qty = float(o.get("qty", 0))
+                # ⚠️ Use `or 0` to handle empty string "" from Bybit
+                price = float(o.get("price") or 0)
+                qty = float(o.get("qty") or 0)
                 if price > 0 and qty > 0:
                     total += (price * qty) / self.leverage
             return total
@@ -131,17 +137,20 @@ class LiveBroker:
                 return positions
 
             for p in resp["result"]["list"]:
-                size = float(p.get("size", 0))
+                # ⚠️ Bybit may return empty string "" for numeric fields
+                # when values are not set. Using `or 0` prevents
+                # "could not convert string to float: ''" ValueError.
+                size = float(p.get("size") or 0)
                 if size <= 0:
                     continue
 
                 side = p.get("side", "")
                 direction = Direction.LONG if side == "Buy" else Direction.SHORT
-                entry = float(p.get("avgPrice", 0))
-                sl = float(p.get("stopLoss", 0))
-                tp = float(p.get("takeProfit", 0))
-                unrealized = float(p.get("unrealisedPnl", 0))
-                mark_price = float(p.get("markPrice", entry))
+                entry = float(p.get("avgPrice") or 0)
+                sl = float(p.get("stopLoss") or 0)
+                tp = float(p.get("takeProfit") or 0)
+                unrealized = float(p.get("unrealisedPnl") or 0)
+                mark_price = float(p.get("markPrice") or entry)
 
                 # Determine phase from current state
                 if direction == Direction.LONG:
@@ -194,17 +203,21 @@ class LiveBroker:
             for o in resp["result"]["list"]:
                 side = o.get("side", "Buy")
                 direction = Direction.LONG if side == "Buy" else Direction.SHORT
+                # ⚠️ Bybit may return empty string "" for numeric fields
+                # when values are not set (e.g. price for market orders).
+                # Using `or 0` converts "" → 0 before float() to avoid
+                # "could not convert string to float: ''" ValueError.
                 order = Order(
                     order_id=o.get("orderId", ""),
                     symbol=o.get("symbol", ""),
                     direction=direction,
                     side=side,
-                    price=float(o.get("price", 0)),
-                    quantity=float(o.get("qty", 0)),
-                    stop_loss=float(o.get("stopLoss", 0)),
-                    take_profit=float(o.get("takeProfit", 0)),
+                    price=float(o.get("price") or 0),
+                    quantity=float(o.get("qty") or 0),
+                    stop_loss=float(o.get("stopLoss") or 0),
+                    take_profit=float(o.get("takeProfit") or 0),
                     status=OrderStatus.PENDING,
-                    placed_at=float(o.get("createdTime", 0)) / 1000.0,
+                    placed_at=float(o.get("createdTime") or 0) / 1000.0,
                 )
                 orders.append(order)
 
