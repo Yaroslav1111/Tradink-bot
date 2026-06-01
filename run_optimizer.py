@@ -124,7 +124,7 @@ def optimize_single_symbol(
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Aegis v5.2 Multi-Symbol Parameter Optimizer")
+    parser = argparse.ArgumentParser(description="Aegis v5.4 Multi-Dimensional Entry/Exit Optimizer")
 
     # Symbol selection (mutually exclusive group)
     symbol_group = parser.add_mutually_exclusive_group()
@@ -132,7 +132,7 @@ def main():
     symbol_group.add_argument("--symbols", default=None, help="Comma-separated list (e.g. BTCUSDT,ETHUSDT,SOLUSDT)")
     symbol_group.add_argument("--all", action="store_true", help="Optimize all 46 monitored coins from config.py")
 
-    parser.add_argument("--days", type=int, default=30, help="Days of history per symbol")
+    parser.add_argument("--days", type=int, default=14, help="Days of history (default: 14 for regime fitting)")
     parser.add_argument("--balance", type=float, default=2000.0, help="Initial balance for backtest")
     parser.add_argument("--workers", type=int, default=4, help="Parallel workers per symbol")
     parser.add_argument("--output", default="optimized_params.json", help="Output JSON path")
@@ -154,20 +154,20 @@ def main():
         # Default to single BTCUSDT
         symbols = ["BTCUSDT"]
 
-    logger.info(f"🚀 Multi-Symbol Optimizer | {len(symbols)} symbols | {args.days} days each")
+    logger.info(f"🚀 Multi-Dimensional Optimizer | {len(symbols)} symbols | {args.days} days each")
 
-    # ─── Define parameter grid ───
-    param_grid = {
-        "fibo_primary": [0.5, 0.618, 0.786],
-        "fibo_secondary": [0.382, 0.50, 0.618],
-        "sl_atr_multiplier": [1.5, 2.0, 2.5],
-        "order_ttl_seconds": [300, 600, 900],
-    }
+    # ─── Define parameter grid (Multi-Dimensional Entry/Exit) ───
+    # Uses the default grid with entry sensitivity + parameter symmetry
+    from runner.optimizer import get_default_param_grid, count_grid_combinations
+    param_grid = get_default_param_grid()
 
-    total_combos = 1
-    for v in param_grid.values():
-        total_combos *= len(v)
-    logger.info(f"🔬 Parameter grid: {total_combos} combinations × {len(symbols)} symbols = {total_combos * len(symbols)} total backtests")
+    total_combos = count_grid_combinations(param_grid)
+    logger.info(
+        f"🔬 Parameter grid: {total_combos} combinations × {len(symbols)} symbols "
+        f"= {total_combos * len(symbols)} total backtests"
+    )
+    logger.info(f"  Dimensions: {', '.join(f'{k}({len(v)})' for k, v in param_grid.items())}")
+    logger.info(f"  Symmetry: rsi_oversold → rsi_overbought (auto-mirrored)")
 
     # ─── Run optimization per symbol ───
     all_best_params: dict[str, dict] = {}
