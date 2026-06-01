@@ -593,13 +593,17 @@ class FiboReversalStrategy:
         if current_price < pos.lowest_price:
             pos.lowest_price = current_price
 
-        # Unrealized PnL
-        if pos.direction == Direction.LONG:
-            unr_pct = (current_price - pos.entry_price) / pos.entry_price
-            peak_pct = (pos.highest_price - pos.entry_price) / pos.entry_price
+    # Unrealized PnL
+        if pos.entry_price <= 0:
+            unr_pct = 0.0
+            peak_pct = 0.0
         else:
-            unr_pct = (pos.entry_price - current_price) / pos.entry_price
-            peak_pct = (pos.entry_price - pos.lowest_price) / pos.entry_price
+            if pos.direction == Direction.LONG:
+                unr_pct = (current_price - pos.entry_price) / pos.entry_price
+                peak_pct = (pos.highest_price - pos.entry_price) / pos.entry_price
+            else:
+                unr_pct = (pos.entry_price - current_price) / pos.entry_price
+                peak_pct = (pos.entry_price - pos.lowest_price) / pos.entry_price
 
         pos.highest_profit_pct = max(pos.highest_profit_pct, peak_pct)
 

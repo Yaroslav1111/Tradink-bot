@@ -32,10 +32,17 @@ BYBIT_DEMO_ENDPOINT: str = "https://api-demo.bybit.com"
 # ──────────────────────────────────────────────
 # Monitored symbols (linear perpetual, Bybit format)
 # ──────────────────────────────────────────────
-
 SYMBOLS: list[str] = [
-    "BTCUSDT", "OPUSDT", "COMPUSDT", "DOGEUSDT", "GALAUSDT",
-    "FILUSDT", "STXUSDT", "BRUSDT", "MANAUSDT", "PORTALUSDT", "BSBUSDT", "NEARUSDT", "HYPEUSDT"
+    "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT",
+    "DOGEUSDT", "ADAUSDT", "AVAXUSDT", "DOTUSDT", "LINKUSDT",
+    "MATICUSDT", "TONUSDT", "TRXUSDT", "UNIUSDT",
+    "ATOMUSDT", "LTCUSDT", "BCHUSDT", "NEARUSDT", "APTUSDT",
+    "FILUSDT", "ARBUSDT", "OPUSDT", "SUIUSDT", "HYPEUSDT",
+    "IMXUSDT", "PORTALUSDT", "WIFUSDT", "FETUSDT", "RENDERUSDT",
+    "INJUSDT", "SEIUSDT", "STXUSDT", "AAVEUSDT", "MKRUSDT",
+    "RUNEUSDT", "TIAUSDT", "ALGOUSDT", "FTMUSDT", "SANDUSDT",
+    "MANAUSDT", "GALAUSDT", "EOSUSDT", "XLMUSDT", "IOTAUSDT",
+    "BRUSDT", "COMPUSDT",
 ]
 
 # ──────────────────────────────────────────────
