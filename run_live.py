@@ -99,6 +99,7 @@ logger = logging.getLogger("aegis.main")
 def main():
     from engine.strategy import FiboReversalStrategy, StrategyConfig
     from broker.live_broker import LiveBroker
+    from broker.exchange_rules import ensure_exchange_rules
     from runner.live_runner import LiveRunner
     from config import SYMBOLS, BYBIT_DEMO_ENDPOINT
 
@@ -114,13 +115,17 @@ def main():
     # Config
     cfg = StrategyConfig()
 
+    # Load exchange rules (auto-fetch if missing or stale)
+    exchange_rules = ensure_exchange_rules(symbols=SYMBOLS)
+
     # Initialize components
     logger.info("=" * 50)
-    logger.info("  AEGIS v5.0 -- Live Trading Mode")
+    logger.info("  AEGIS v5.3 -- Live Trading Mode")
     logger.info("=" * 50)
+    logger.info(f"  Exchange rules: {len(exchange_rules)} symbols loaded")
 
     broker = LiveBroker(api_key, api_secret, leverage=cfg.leverage)
-    strategy = FiboReversalStrategy(cfg, initial_balance=2000.0)
+    strategy = FiboReversalStrategy(cfg, initial_balance=2000.0, exchange_rules=exchange_rules)
 
     runner = LiveRunner(
         broker=broker,
@@ -129,6 +134,7 @@ def main():
         scan_interval=60,
         candle_interval="15",
         candle_limit=200,
+        exchange_rules=exchange_rules,
     )
 
     # Run

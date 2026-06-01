@@ -57,6 +57,7 @@ class BacktestRunner:
         strategy_cfg: StrategyConfig,
         backtest_cfg: BacktestConfig,
         optimized_params: Optional[dict[str, dict]] = None,
+        exchange_rules: Optional[dict[str, dict]] = None,
     ):
         self.strategy_cfg = strategy_cfg
         self.bt_cfg = backtest_cfg
@@ -82,6 +83,7 @@ class BacktestRunner:
         self.strategy = FiboReversalStrategy(
             cfg=self.strategy_cfg,
             initial_balance=backtest_cfg.initial_balance,
+            exchange_rules=exchange_rules,
         )
 
     def run(

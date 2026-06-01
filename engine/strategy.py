@@ -356,10 +356,17 @@ class FiboReversalStrategy:
     It receives a Broker interface and calls broker methods.
     """
 
-    def __init__(self, cfg: StrategyConfig, initial_balance: float = 2000.0):
+    def __init__(
+        self,
+        cfg: StrategyConfig,
+        initial_balance: float = 2000.0,
+        exchange_rules: Optional[dict[str, dict]] = None,
+    ):
         self.cfg = cfg
         self.compound = CompoundCalc(initial_balance, cfg)
         self.trade_history: list[TradeResult] = []
+        # Exchange rules: {"BTCUSDT": {"qtyStep": 0.001, "minOrderQty": 0.001, "tickSize": 0.1}}
+        self._exchange_rules = exchange_rules or {}
 
     # ──────────────────────────────────────────
     # SIGNAL DETECTION (15m scan)
@@ -497,6 +504,38 @@ class FiboReversalStrategy:
         if margin_needed > account.free_margin:
             logger.info(f"  💸 {symbol}: Insufficient margin ({margin_needed:.2f} > {account.free_margin:.2f})")
             return None
+
+        # ─── Exchange Rules Precision (Exact-in-Exact) ───
+        rules = self._exchange_rules.get(symbol)
+        if rules:
+            from broker.exchange_rules import floor_qty, round_to_tick
+
+            qty_step = rules.get("qtyStep", 0)
+            min_order_qty = rules.get("minOrderQty", 0)
+            tick_size = rules.get("tickSize", 0)
+
+            # Floor quantities to qtyStep
+            if qty_step > 0:
+                qty_50 = floor_qty(qty_50, qty_step)
+                qty_618 = floor_qty(qty_618, qty_step)
+
+            # Check minOrderQty — cancel signal if below minimum
+            if min_order_qty > 0:
+                if qty_50 < min_order_qty or qty_618 < min_order_qty:
+                    logger.info(
+                        f"  📏 {symbol}: Qty below minimum "
+                        f"(qty_50={qty_50}, qty_618={qty_618}, min={min_order_qty})"
+                    )
+                    return None
+
+            # Round prices to tickSize
+            if tick_size > 0:
+                e50 = round_to_tick(e50, tick_size)
+                e618 = round_to_tick(e618, tick_size)
+                stop_loss = round_to_tick(stop_loss, tick_size)
+                take_profit = round_to_tick(take_profit, tick_size)
+                ext_1 = round_to_tick(ext_1, tick_size)
+                ext_2 = round_to_tick(ext_2, tick_size)
 
         # RSI/CCI/WillR for logging
         rsi_val = float(Indicators.rsi(close, 14).iloc[-1])

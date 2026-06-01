@@ -9,6 +9,7 @@ Key features:
   - Cascade order management (place, TTL, merge on fill)
   - 3-phase position management with SL/TP sync to exchange
   - Symbol-specific configuration from optimized_params.json
+  - Exchange rules precision (qtyStep, minOrderQty, tickSize)
 """
 from __future__ import annotations
 
@@ -50,6 +51,7 @@ class LiveRunner:
         candle_interval: str = "15",
         candle_limit: int = 200,
         optimized_params_path: str = "optimized_params.json",
+        exchange_rules: Optional[dict[str, dict]] = None,
     ):
         self.broker = broker
         self.strategy = strategy
@@ -59,10 +61,14 @@ class LiveRunner:
         self.candle_interval = candle_interval
         self.candle_limit = candle_limit
 
+        # Inject exchange rules into default strategy
+        if exchange_rules:
+            self.strategy._exchange_rules = exchange_rules
+
         # Symbol-specific configs (loaded from optimized_params.json)
         self._symbol_configs: dict[str, StrategyConfig] = {}
         self._symbol_strategies: dict[str, FiboReversalStrategy] = {}
-        self._load_optimized_params(optimized_params_path)
+        self._load_optimized_params(optimized_params_path, exchange_rules)
 
         # Tracked state (recovered from exchange)
         self.active_orders: list[Order] = []
@@ -74,7 +80,7 @@ class LiveRunner:
 
     # ─────────────────── Symbol-Specific Config ───────────────────
 
-    def _load_optimized_params(self, path: str):
+    def _load_optimized_params(self, path: str, exchange_rules: Optional[dict[str, dict]] = None):
         """Load per-symbol optimized parameters from JSON file."""
         p = Path(path)
         if not p.exists():
@@ -94,7 +100,9 @@ class LiveRunner:
                 cfg = StrategyConfig(**merged)
                 self._symbol_configs[symbol] = cfg
                 self._symbol_strategies[symbol] = FiboReversalStrategy(
-                    cfg, initial_balance=self.strategy.compound.balance
+                    cfg,
+                    initial_balance=self.strategy.compound.balance,
+                    exchange_rules=exchange_rules,
                 )
                 count += 1
 
