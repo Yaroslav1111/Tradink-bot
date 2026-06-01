@@ -1,5 +1,5 @@
 """
-v5.0 — Live Runner (Real-Time Trading Loop)
+v5.4 — Live Runner (Real-Time Trading Loop)
 ══════════════════════════════════════════════
 Connects Strategy (Brain) to LiveBroker (Exchange).
 
@@ -10,6 +10,7 @@ Key features:
   - 3-phase position management with SL/TP sync to exchange
   - Symbol-specific configuration from optimized_params.json
   - Exchange rules precision (qtyStep, minOrderQty, tickSize)
+  - Dynamic portfolio sync with graceful draining (v5.4)
 """
 from __future__ import annotations
 
@@ -52,14 +53,19 @@ class LiveRunner:
         candle_limit: int = 200,
         optimized_params_path: str = "optimized_params.json",
         exchange_rules: Optional[dict[str, dict]] = None,
+        auto_sync: bool = False,
+        active_portfolio_path: str = "data/active_portfolio.json",
     ):
         self.broker = broker
         self.strategy = strategy
         self.cfg = strategy.cfg
-        self.symbols = symbols
+        self.symbols = list(symbols)  # mutable copy
         self.scan_interval = scan_interval
         self.candle_interval = candle_interval
         self.candle_limit = candle_limit
+        self.auto_sync = auto_sync
+        self.active_portfolio_path = active_portfolio_path
+        self._exchange_rules = exchange_rules
 
         # Inject exchange rules into default strategy
         if exchange_rules:
@@ -70,10 +76,17 @@ class LiveRunner:
         self._symbol_strategies: dict[str, FiboReversalStrategy] = {}
         self._load_optimized_params(optimized_params_path, exchange_rules)
 
+        # Graceful draining: symbols being phased out (no new entries)
+        self.draining_symbols: set[str] = set()
+
         # Tracked state (recovered from exchange)
         self.active_orders: list[Order] = []
         self.active_positions: list[Position] = []
         self._cascade_groups: dict[str, list[Order]] = {}  # group_id -> orders
+
+        # Cycle counter for periodic sync
+        self._sync_counter: int = 0
+        self._sync_every_n_cycles: int = 15
 
         # Recover state from exchange (Amnesia Fix)
         self._recover_state()
@@ -136,13 +149,21 @@ class LiveRunner:
         """Main trading loop — runs until interrupted."""
         logger.info(
             f"🚀 LiveRunner started | {len(self.symbols)} symbols | "
-            f"Scan every {self.scan_interval}s"
+            f"Scan every {self.scan_interval}s | "
+            f"Auto-sync: {self.auto_sync}"
         )
         cycle = 0
         while True:
             try:
                 cycle += 1
                 logger.info(f"\n{'═'*50}\n  CYCLE {cycle} | {time.strftime('%H:%M:%S')}\n{'═'*50}")
+
+                # Periodic portfolio sync (every N cycles)
+                if self.auto_sync:
+                    self._sync_counter += 1
+                    if self._sync_counter >= self._sync_every_n_cycles:
+                        self._sync_counter = 0
+                        self.sync_portfolio()
 
                 self._run_cycle()
 
@@ -168,10 +189,13 @@ class LiveRunner:
         # 2. Manage pending orders (TTL, fill detection)
         self._manage_orders()
 
-        # 3. Manage open positions (trailing, TP reposition)
+        # 3. Manage open positions (ALL positions: active + draining)
         self._manage_positions()
 
-        # 4. Scan for new signals (if capacity available)
+        # 4. Cleanup fully drained symbols (no positions/orders remaining)
+        self._cleanup_drained_symbols()
+
+        # 5. Scan ONLY active symbols for new signals (not draining)
         occupied_symbols = set(
             p.symbol for p in self.active_positions
         ) | set(
@@ -183,7 +207,7 @@ class LiveRunner:
             return
 
         entries_this_cycle = 0
-        for symbol in self.symbols:
+        for symbol in self.symbols:  # Only active symbols (not draining)
             if entries_this_cycle >= self.cfg.max_entries_per_cycle:
                 break
             if symbol in occupied_symbols:
@@ -194,6 +218,139 @@ class LiveRunner:
                 self._execute_signal(signal)
                 entries_this_cycle += 1
                 occupied_symbols.add(symbol)
+
+    # ─────────────────── Portfolio Sync (Graceful Draining) ───────────────────
+
+    def sync_portfolio(self):
+        """
+        Hot-reload active portfolio from data/active_portfolio.json.
+
+        - New symbols: create strategy instances, add to self.symbols
+        - Removed symbols: move from self.symbols to self.draining_symbols
+        - Draining symbols stop receiving new signals but existing positions
+          are managed until naturally closed.
+        """
+        if not os.path.exists(self.active_portfolio_path):
+            logger.debug("📋 No active_portfolio.json found — skipping sync")
+            return
+
+        try:
+            with open(self.active_portfolio_path, "r") as f:
+                data = json.load(f)
+
+            new_active = data.get("symbols", [])
+            if not new_active:
+                logger.warning("⚠️ active_portfolio.json has empty symbols list — ignoring")
+                return
+
+            new_active_set = set(new_active)
+            current_active_set = set(self.symbols)
+
+            # Additions: symbols in new list but not currently active
+            additions = new_active_set - current_active_set - self.draining_symbols
+            # Removals: symbols currently active but not in new list
+            removals = current_active_set - new_active_set
+
+            # Process additions
+            for symbol in additions:
+                self._add_symbol(symbol)
+
+            # Process removals (move to draining)
+            for symbol in removals:
+                self.symbols.remove(symbol)
+                self.draining_symbols.add(symbol)
+                logger.info(f"  🔻 {symbol} → draining (removed from active portfolio)")
+
+            # Re-activate: if a draining symbol reappears in the active list
+            reactivated = self.draining_symbols & new_active_set
+            for symbol in reactivated:
+                self.draining_symbols.discard(symbol)
+                if symbol not in self.symbols:
+                    self.symbols.append(symbol)
+                    logger.info(f"  🔄 {symbol} re-activated from draining")
+
+            if additions or removals or reactivated:
+                logger.info(
+                    f"  📊 Portfolio sync: +{len(additions)} added, "
+                    f"-{len(removals)} draining, "
+                    f"↩️{len(reactivated)} reactivated | "
+                    f"Active: {len(self.symbols)} | Draining: {len(self.draining_symbols)}"
+                )
+            else:
+                logger.debug("📋 Portfolio sync: no changes")
+
+        except (json.JSONDecodeError, IOError, KeyError) as e:
+            logger.warning(f"⚠️ Failed to read active_portfolio.json: {e}")
+
+    def _add_symbol(self, symbol: str):
+        """
+        Add a new symbol to active trading:
+        load its optimized config, create strategy instance.
+        """
+        from dataclasses import asdict
+
+        # Load optimized params if available
+        params_path = Path(
+            os.path.dirname(self.active_portfolio_path)
+        ).parent / "optimized_params.json"
+        overrides = {}
+        if params_path.exists():
+            try:
+                with open(params_path, "r") as f:
+                    all_params = json.load(f)
+                overrides = all_params.get(symbol, {})
+            except (json.JSONDecodeError, IOError):
+                pass
+
+        # Build config
+        base_dict = {k: v for k, v in asdict(self.cfg).items()}
+        base_dict.update(overrides)
+        cfg = StrategyConfig(**base_dict)
+
+        # Create strategy instance
+        strat = FiboReversalStrategy(
+            cfg,
+            initial_balance=self.strategy.compound.balance,
+            exchange_rules=self._exchange_rules,
+        )
+
+        self._symbol_configs[symbol] = cfg
+        self._symbol_strategies[symbol] = strat
+        self.symbols.append(symbol)
+
+        logger.info(f"  🔺 {symbol} → added to active portfolio (overrides: {len(overrides)} params)")
+
+    # ─────────────────── Draining Cleanup ───────────────────
+
+    def _cleanup_drained_symbols(self):
+        """
+        After position management, check if any draining symbol has
+        ZERO active positions and ZERO pending orders.
+        If so, fully remove it from memory.
+        """
+        if not self.draining_symbols:
+            return
+
+        # Gather symbols with active positions or orders
+        symbols_with_positions = set(p.symbol for p in self.active_positions)
+        symbols_with_orders = set(o.symbol for o in self.active_orders)
+        occupied = symbols_with_positions | symbols_with_orders
+
+        # Find draining symbols that are completely clear
+        fully_drained = self.draining_symbols - occupied
+
+        for symbol in fully_drained:
+            self.draining_symbols.discard(symbol)
+            # Clean up strategy instances
+            self._symbol_configs.pop(symbol, None)
+            self._symbol_strategies.pop(symbol, None)
+            logger.info(f"  🗑️ {symbol} fully drained — removed from memory")
+
+        if fully_drained:
+            logger.info(
+                f"  ♻️ Cleaned {len(fully_drained)} drained symbols | "
+                f"Remaining draining: {len(self.draining_symbols)}"
+            )
 
     # ─────────────────── Signal Detection ───────────────────
 

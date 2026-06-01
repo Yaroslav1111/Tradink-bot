@@ -1,13 +1,17 @@
 #!/usr/bin/env python3
 """
-v5.0 — Live Trading Entry Point
+v5.4 — Live Trading Entry Point
 ══════════════════════════════════
-Run: python run_live.py
+Run: python run_live.py [--auto-sync]
+
+Flags:
+  --auto-sync   Enable dynamic portfolio rebalancing (reads data/active_portfolio.json)
 
 Environment variables required (from .env.local):
   BYBIT_DEMO_KEY    — Bybit Demo API key
   BYBIT_DEMO_SECRET — Bybit Demo API secret
 """
+import argparse
 import logging
 import os
 import sys
@@ -97,6 +101,14 @@ logger = logging.getLogger("aegis.main")
 
 
 def main():
+    parser = argparse.ArgumentParser(description="Aegis v5.4 — Live Trading")
+    parser.add_argument(
+        "--auto-sync",
+        action="store_true",
+        help="Enable dynamic portfolio sync (reads data/active_portfolio.json every 15 cycles)",
+    )
+    args = parser.parse_args()
+
     from engine.strategy import FiboReversalStrategy, StrategyConfig
     from broker.live_broker import LiveBroker
     from broker.exchange_rules import ensure_exchange_rules
@@ -120,9 +132,10 @@ def main():
 
     # Initialize components
     logger.info("=" * 50)
-    logger.info("  AEGIS v5.3 -- Live Trading Mode")
+    logger.info("  AEGIS v5.4 -- Live Trading Mode")
     logger.info("=" * 50)
     logger.info(f"  Exchange rules: {len(exchange_rules)} symbols loaded")
+    logger.info(f"  Auto-sync: {args.auto_sync}")
 
     broker = LiveBroker(api_key, api_secret, leverage=cfg.leverage)
     strategy = FiboReversalStrategy(cfg, initial_balance=2000.0, exchange_rules=exchange_rules)
@@ -135,6 +148,7 @@ def main():
         candle_interval="15",
         candle_limit=200,
         exchange_rules=exchange_rules,
+        auto_sync=args.auto_sync,
     )
 
     # Run
