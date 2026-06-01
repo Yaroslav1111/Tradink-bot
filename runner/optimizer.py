@@ -1,11 +1,15 @@
 """
-v5.0 — Parameter Optimizer (Grid Search)
-══════════════════════════════════════════════
+v5.4 — Parameter Optimizer (Multi-Dimensional Entry/Exit Grid Search)
+══════════════════════════════════════════════════════════════════════
 Runs backtests with different StrategyConfig combinations.
 
 Key features:
   - Grid search over any config parameters
   - Multi-symbol batch optimization (individual best params per coin)
+  - Parameter Symmetry: auto-deduces inverse params (e.g., RSI oversold ↔ overbought)
+  - Entry Sensitivity: oscillator thresholds + POC weight in grid
+  - Short-Term Memory: 14-day default window for mean-reversion regime fitting
+  - Combinatorial Safety: designed for 80-150 combos per asset
   - Parallel execution via ProcessPoolExecutor
   - Results sorted by profit and drawdown
   - JSON export of best params per symbol (optimized_params.json)
@@ -27,6 +31,88 @@ from engine.strategy import StrategyConfig
 from runner.backtest_runner import BacktestRunner, BacktestConfig
 
 logger = logging.getLogger("aegis.runner.optimizer")
+
+
+# ══════════════════════════════════════════════════════════════════
+# PARAMETER SYMMETRY ENGINE
+# ══════════════════════════════════════════════════════════════════
+
+# Symmetric parameter pairs: when one value is tested, the inverse
+# is auto-calculated to maintain logical consistency without
+# exploding grid dimensions.
+#
+# Format: {primary_param: (inverse_param, mirror_fn)}
+# The mirror_fn receives the primary value and returns the inverse value.
+
+SYMMETRIC_PAIRS: dict[str, tuple[str, callable]] = {
+    # RSI: oversold threshold mirrors to overbought (100 - value)
+    "rsi_oversold": ("rsi_overbought", lambda v: 100.0 - v),
+    # CCI: oversold mirrors to overbought (negation)
+    "cci_oversold": ("cci_overbought", lambda v: -v),
+    # Williams%R: oversold mirrors to overbought (-100 - value)
+    "willr_oversold": ("willr_overbought", lambda v: -100.0 - v),
+}
+
+
+def apply_symmetry(param_dict: dict) -> dict:
+    """
+    Apply parameter symmetry rules to an overrides dict.
+    If a primary param is set, auto-inject its inverse.
+    
+    Example:
+        {"rsi_oversold": 20} → {"rsi_oversold": 20, "rsi_overbought": 80}
+    """
+    result = dict(param_dict)
+    for primary, (inverse, mirror_fn) in SYMMETRIC_PAIRS.items():
+        if primary in result and inverse not in result:
+            result[inverse] = mirror_fn(result[primary])
+    return result
+
+
+# ══════════════════════════════════════════════════════════════════
+# DEFAULT MULTI-DIMENSIONAL GRID
+# ══════════════════════════════════════════════════════════════════
+
+def get_default_param_grid() -> dict[str, list]:
+    """
+    Multi-dimensional entry/exit optimization grid.
+    
+    Covers:
+      - Entry Sensitivity: oscillator thresholds (rsi_oversold) + POC weight
+      - Exit Mechanics: SL distance (ATR multiplier) + trailing trigger
+      - Fibonacci Entry: primary retracement level
+    
+    Design: 3 × 3 × 3 × 3 × 3 = 243... reduced via careful value selection
+    to ~135 combinations (within 80-150 safety budget).
+    
+    Actual: 3 × 3 × 3 × 5 × 1 = 135 combinations
+    """
+    return {
+        # Entry Sensitivity: oscillator extreme thresholds
+        # (rsi_overbought auto-injected via symmetry: 100 - value)
+        "rsi_oversold": [12.0, 18.0, 25.0],
+        
+        # Entry Sensitivity: POC weight (how much volume profile
+        # shifts the Fibonacci entry point)
+        "poc_weight": [0.3, 0.5, 0.7],
+        
+        # Fibonacci Entry: primary retracement level
+        "fibo_primary": [0.5, 0.618, 0.786],
+        
+        # Exit Mechanics: initial SL distance
+        "sl_atr_multiplier": [1.5, 2.0, 2.5, 3.0, 3.5],
+        
+        # Note: order_ttl_seconds removed (fixed at 600s for mean-reversion)
+        # Note: trailing_trigger_pct tied to SL via design (not independently searched)
+    }
+
+
+def count_grid_combinations(grid: dict[str, list]) -> int:
+    """Calculate total number of combinations in a parameter grid."""
+    total = 1
+    for values in grid.values():
+        total *= len(values)
+    return total
 
 
 def _run_single_backtest(args: tuple) -> dict:
@@ -85,7 +171,7 @@ class Optimizer:
         logger.info(f"🔬 Optimizer: {len(self.combinations)} parameter combinations")
 
     def _generate_combinations(self) -> list[dict]:
-        """Generate all parameter combinations from grid."""
+        """Generate all parameter combinations from grid, applying symmetry."""
         keys = list(self.param_grid.keys())
         values = list(self.param_grid.values())
 
@@ -98,6 +184,8 @@ class Optimizer:
         combinations = []
         for combo in itertools.product(*values):
             param_dict = dict(zip(keys, combo))
+            # Apply parameter symmetry (auto-inject inverse params)
+            param_dict = apply_symmetry(param_dict)
             combinations.append(param_dict)
 
         return combinations
@@ -277,7 +365,7 @@ class Optimizer:
     def get_best_params(self, df_results: pd.DataFrame) -> dict:
         """
         Extract the best (Top-1) parameter overrides from results.
-        Returns only the grid-searched params (not the full StrategyConfig).
+        Returns the grid-searched params AND their symmetric inverses.
         """
         if df_results.empty:
             return {}
@@ -292,6 +380,9 @@ class Optimizer:
                 if hasattr(val, 'item'):
                     val = val.item()
                 params[key] = val
+
+        # Apply symmetry to include derived inverse params
+        params = apply_symmetry(params)
         return params
 
     @staticmethod

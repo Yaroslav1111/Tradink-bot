@@ -68,9 +68,9 @@ def fetch_historical_data(symbol: str, interval: str, limit: int) -> "pd.DataFra
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Aegis v5.2 Backtester")
+    parser = argparse.ArgumentParser(description="Aegis v5.4 Backtester")
     parser.add_argument("--symbol", default="BTCUSDT", help="Trading pair")
-    parser.add_argument("--days", type=int, default=30, help="Days of history")
+    parser.add_argument("--days", type=int, default=14, help="Days of history (default: 14 for regime fitting)")
     parser.add_argument("--balance", type=float, default=2000.0, help="Initial balance")
     parser.add_argument("--leverage", type=float, default=5.0, help="Leverage")
     parser.add_argument("--warmup", type=int, default=100, help="Warmup bars")

@@ -1397,6 +1397,156 @@ class TestExchangeRulesPrecision(unittest.TestCase):
 
 
 # ══════════════════════════════════════════════════════════════════
+# MULTI-DIMENSIONAL OPTIMIZER TESTS (Parameter Symmetry + Entry Sensitivity)
+# ══════════════════════════════════════════════════════════════════
+
+class TestMultiDimensionalOptimizer(unittest.TestCase):
+    """Tests for v5.4 parameter symmetry and multi-dimensional grid."""
+
+    def test_apply_symmetry_rsi(self):
+        """apply_symmetry auto-injects rsi_overbought from rsi_oversold."""
+        from runner.optimizer import apply_symmetry
+        result = apply_symmetry({"rsi_oversold": 20.0})
+        self.assertEqual(result["rsi_oversold"], 20.0)
+        self.assertEqual(result["rsi_overbought"], 80.0)
+
+    def test_apply_symmetry_cci(self):
+        """apply_symmetry auto-injects cci_overbought from cci_oversold."""
+        from runner.optimizer import apply_symmetry
+        result = apply_symmetry({"cci_oversold": -200.0})
+        self.assertEqual(result["cci_oversold"], -200.0)
+        self.assertEqual(result["cci_overbought"], 200.0)
+
+    def test_apply_symmetry_willr(self):
+        """apply_symmetry auto-injects willr_overbought from willr_oversold."""
+        from runner.optimizer import apply_symmetry
+        result = apply_symmetry({"willr_oversold": -92.0})
+        self.assertEqual(result["willr_oversold"], -92.0)
+        self.assertEqual(result["willr_overbought"], -8.0)
+
+    def test_apply_symmetry_no_override_if_explicit(self):
+        """apply_symmetry does NOT override if inverse is explicitly set."""
+        from runner.optimizer import apply_symmetry
+        result = apply_symmetry({"rsi_oversold": 20.0, "rsi_overbought": 90.0})
+        self.assertEqual(result["rsi_overbought"], 90.0)  # explicit stays
+
+    def test_apply_symmetry_no_symmetric_params(self):
+        """apply_symmetry passes through non-symmetric params unchanged."""
+        from runner.optimizer import apply_symmetry
+        result = apply_symmetry({"fibo_primary": 0.786, "sl_atr_multiplier": 2.5})
+        self.assertEqual(result, {"fibo_primary": 0.786, "sl_atr_multiplier": 2.5})
+
+    def test_apply_symmetry_multiple_pairs(self):
+        """apply_symmetry handles multiple symmetric pairs at once."""
+        from runner.optimizer import apply_symmetry
+        result = apply_symmetry({
+            "rsi_oversold": 15.0,
+            "cci_oversold": -300.0,
+            "willr_oversold": -95.0,
+        })
+        self.assertEqual(result["rsi_overbought"], 85.0)
+        self.assertEqual(result["cci_overbought"], 300.0)
+        self.assertEqual(result["willr_overbought"], -5.0)
+
+    def test_default_grid_combinatorial_safety(self):
+        """Default grid stays within 80-150 combinations."""
+        from runner.optimizer import get_default_param_grid, count_grid_combinations
+        grid = get_default_param_grid()
+        total = count_grid_combinations(grid)
+        self.assertGreaterEqual(total, 80, f"Grid too small: {total}")
+        self.assertLessEqual(total, 150, f"Grid too large: {total}")
+
+    def test_default_grid_has_entry_sensitivity(self):
+        """Default grid includes oscillator thresholds and POC weight."""
+        from runner.optimizer import get_default_param_grid
+        grid = get_default_param_grid()
+        self.assertIn("rsi_oversold", grid)
+        self.assertIn("poc_weight", grid)
+        self.assertIn("fibo_primary", grid)
+        self.assertIn("sl_atr_multiplier", grid)
+
+    def test_optimizer_applies_symmetry_in_combinations(self):
+        """Optimizer._generate_combinations() injects symmetric params."""
+        from runner.optimizer import Optimizer
+
+        param_grid = {"rsi_oversold": [15.0, 20.0, 25.0]}
+        optimizer = Optimizer(param_grid=param_grid)
+
+        # Each combination should have rsi_overbought auto-injected
+        for combo in optimizer.combinations:
+            self.assertIn("rsi_overbought", combo)
+            expected_ob = 100.0 - combo["rsi_oversold"]
+            self.assertEqual(combo["rsi_overbought"], expected_ob)
+
+    def test_optimizer_symmetry_with_mixed_params(self):
+        """Optimizer handles grid with both symmetric and regular params."""
+        from runner.optimizer import Optimizer
+
+        param_grid = {
+            "rsi_oversold": [12.0, 25.0],
+            "fibo_primary": [0.5, 0.786],
+        }
+        optimizer = Optimizer(param_grid=param_grid)
+
+        # 2 × 2 = 4 combinations, each with rsi_overbought injected
+        self.assertEqual(len(optimizer.combinations), 4)
+        for combo in optimizer.combinations:
+            self.assertIn("rsi_overbought", combo)
+            self.assertIn("fibo_primary", combo)
+
+    def test_get_best_params_includes_symmetry(self):
+        """get_best_params returns symmetric inverse params too."""
+        from runner.optimizer import Optimizer
+
+        param_grid = {"rsi_oversold": [15.0, 20.0]}
+        optimizer = Optimizer(param_grid=param_grid)
+
+        # Mock results
+        rows = [
+            {"total_pnl": 100, "return_pct": 5, "max_drawdown_pct": 3,
+             "total_trades": 10, "win_rate": 60, "profit_factor": 2.0,
+             "final_balance": 2100, "avg_trade_pnl": 10,
+             "param_rsi_oversold": 20.0},
+        ]
+        df = pd.DataFrame(rows)
+
+        best = optimizer.get_best_params(df)
+        self.assertEqual(best["rsi_oversold"], 20.0)
+        self.assertEqual(best["rsi_overbought"], 80.0)  # auto-derived
+
+    def test_optimizer_runs_with_new_grid(self):
+        """Optimizer completes with the new multi-dimensional grid."""
+        from runner.optimizer import Optimizer, get_default_param_grid
+        from runner.backtest_runner import BacktestConfig
+
+        # Use a small subset of the grid for speed
+        param_grid = {
+            "rsi_oversold": [15.0, 25.0],
+            "poc_weight": [0.3, 0.7],
+        }
+
+        bt_cfg = BacktestConfig(symbol="TESTUSDT", initial_balance=2000.0)
+        optimizer = Optimizer(
+            param_grid=param_grid,
+            base_config=StrategyConfig(),
+            backtest_config=bt_cfg,
+        )
+
+        df = make_ohlcv_df(300, base_price=100.0, seed=77)
+        results = optimizer.run(df, parallel=False)
+
+        # Should have 4 results (2×2)
+        self.assertEqual(len(results), 4)
+        self.assertIn("total_pnl", results.columns)
+
+    def test_count_grid_combinations(self):
+        """count_grid_combinations correctly calculates total."""
+        from runner.optimizer import count_grid_combinations
+        grid = {"a": [1, 2, 3], "b": [4, 5], "c": [6, 7, 8, 9]}
+        self.assertEqual(count_grid_combinations(grid), 3 * 2 * 4)
+
+
+# ══════════════════════════════════════════════════════════════════
 # PORTFOLIO SELECTOR TESTS
 # ══════════════════════════════════════════════════════════════════
 
