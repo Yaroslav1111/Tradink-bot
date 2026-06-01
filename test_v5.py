@@ -1222,6 +1222,250 @@ class TestSymbolSpecificConfig(unittest.TestCase):
 
 
 # ══════════════════════════════════════════════════════════════════
+# EXCHANGE RULES PRECISION TESTS
+# ══════════════════════════════════════════════════════════════════
+
+class TestExchangeRulesPrecision(unittest.TestCase):
+    """Tests for exchange rules: qtyStep floor, tickSize rounding, minOrderQty."""
+
+    def test_floor_qty_basic(self):
+        """floor_qty floors to nearest step."""
+        from broker.exchange_rules import floor_qty
+        self.assertEqual(floor_qty(0.1234, 0.001), 0.123)
+        self.assertEqual(floor_qty(0.1239, 0.001), 0.123)
+        self.assertEqual(floor_qty(1.999, 0.01), 1.99)
+        self.assertEqual(floor_qty(5.0, 0.001), 5.0)
+
+    def test_floor_qty_large_step(self):
+        """floor_qty with large step sizes (e.g., 1 for BTC lot)."""
+        from broker.exchange_rules import floor_qty
+        self.assertEqual(floor_qty(0.1234, 0.1), 0.1)
+        self.assertEqual(floor_qty(2.9, 1.0), 2.0)
+        self.assertEqual(floor_qty(99.5, 10.0), 90.0)
+
+    def test_floor_qty_zero_step_passthrough(self):
+        """floor_qty with step=0 returns original value."""
+        from broker.exchange_rules import floor_qty
+        self.assertEqual(floor_qty(1.2345, 0), 1.2345)
+
+    def test_floor_qty_exact_multiple(self):
+        """floor_qty doesn't round down when already exact."""
+        from broker.exchange_rules import floor_qty
+        self.assertEqual(floor_qty(0.003, 0.001), 0.003)
+        self.assertEqual(floor_qty(0.5, 0.1), 0.5)
+
+    def test_round_to_tick_basic(self):
+        """round_to_tick rounds to nearest tick."""
+        from broker.exchange_rules import round_to_tick
+        self.assertEqual(round_to_tick(45123.456, 0.1), 45123.5)
+        self.assertEqual(round_to_tick(45123.444, 0.1), 45123.4)
+        self.assertEqual(round_to_tick(100.123, 0.01), 100.12)
+
+    def test_round_to_tick_large_tick(self):
+        """round_to_tick with large tick sizes."""
+        from broker.exchange_rules import round_to_tick
+        self.assertEqual(round_to_tick(45123.0, 10.0), 45120.0)
+        self.assertEqual(round_to_tick(45127.0, 10.0), 45130.0)
+        self.assertEqual(round_to_tick(0.99999, 0.0001), 1.0)
+
+    def test_round_to_tick_zero_passthrough(self):
+        """round_to_tick with tick=0 returns original."""
+        from broker.exchange_rules import round_to_tick
+        self.assertEqual(round_to_tick(1.2345, 0), 1.2345)
+
+    def test_step_decimals(self):
+        """_step_decimals counts decimal places correctly."""
+        from broker.exchange_rules import _step_decimals
+        self.assertEqual(_step_decimals(0.001), 3)
+        self.assertEqual(_step_decimals(0.01), 2)
+        self.assertEqual(_step_decimals(0.1), 1)
+        self.assertEqual(_step_decimals(1.0), 0)  # "1.0" → trailing zeros stripped → 0 decimals
+        self.assertEqual(_step_decimals(10.0), 0)
+
+    def test_build_signal_floors_qty(self):
+        """build_signal floors quantity to qtyStep and respects minOrderQty."""
+        exchange_rules = {
+            "BTCUSDT": {"qtyStep": 0.001, "minOrderQty": 0.001, "tickSize": 0.1},
+        }
+        cfg = StrategyConfig()
+        strategy = FiboReversalStrategy(cfg, initial_balance=2000.0, exchange_rules=exchange_rules)
+
+        df = make_ohlcv_df(200, base_price=100.0, seed=42)
+        account = AccountState(
+            total_balance=2000, available_balance=2000,
+            locked_margin=0, pending_margin=0,
+        )
+
+        # Force a signal
+        signal = strategy.build_signal("BTCUSDT", Direction.LONG, df, None, 100.0, account)
+        if signal is not None:
+            # Quantities must be exact multiples of 0.001 (floored)
+            # Check by verifying that floor_qty returns the same value
+            from broker.exchange_rules import floor_qty, round_to_tick
+            self.assertEqual(floor_qty(signal.qty_50, 0.001), signal.qty_50)
+            self.assertEqual(floor_qty(signal.qty_618, 0.001), signal.qty_618)
+            # Prices must be multiples of 0.1 (rounded to tick)
+            self.assertEqual(round_to_tick(signal.entry_price_50, 0.1), signal.entry_price_50)
+            self.assertEqual(round_to_tick(signal.stop_loss, 0.1), signal.stop_loss)
+            self.assertEqual(round_to_tick(signal.take_profit, 0.1), signal.take_profit)
+
+    def test_build_signal_rejects_below_min_qty(self):
+        """build_signal returns None when floored qty < minOrderQty."""
+        # Set absurdly high minOrderQty so signal gets rejected
+        exchange_rules = {
+            "BTCUSDT": {"qtyStep": 1.0, "minOrderQty": 1000.0, "tickSize": 0.01},
+        }
+        cfg = StrategyConfig()
+        strategy = FiboReversalStrategy(cfg, initial_balance=2000.0, exchange_rules=exchange_rules)
+
+        df = make_ohlcv_df(200, base_price=100.0, seed=42)
+        account = AccountState(
+            total_balance=2000, available_balance=2000,
+            locked_margin=0, pending_margin=0,
+        )
+
+        signal = strategy.build_signal("BTCUSDT", Direction.LONG, df, None, 100.0, account)
+        # Should be None because qty will be less than minOrderQty=1000
+        self.assertIsNone(signal)
+
+    def test_build_signal_no_rules_passthrough(self):
+        """build_signal works normally without exchange rules (backward compat)."""
+        cfg = StrategyConfig()
+        strategy = FiboReversalStrategy(cfg, initial_balance=2000.0)
+
+        df = make_ohlcv_df(200, base_price=100.0, seed=42)
+        account = AccountState(
+            total_balance=2000, available_balance=2000,
+            locked_margin=0, pending_margin=0,
+        )
+
+        # Should work fine (no rules = no rounding)
+        signal = strategy.build_signal("BTCUSDT", Direction.LONG, df, None, 100.0, account)
+        # May or may not generate signal depending on data — just ensure no crash
+        # The key assertion: no exception raised
+
+    def test_build_signal_unknown_symbol_no_rules(self):
+        """build_signal for symbol not in exchange_rules uses no rounding."""
+        exchange_rules = {
+            "ETHUSDT": {"qtyStep": 0.01, "minOrderQty": 0.01, "tickSize": 0.01},
+        }
+        cfg = StrategyConfig()
+        strategy = FiboReversalStrategy(cfg, initial_balance=2000.0, exchange_rules=exchange_rules)
+
+        df = make_ohlcv_df(200, base_price=100.0, seed=42)
+        account = AccountState(
+            total_balance=2000, available_balance=2000,
+            locked_margin=0, pending_margin=0,
+        )
+
+        # BTCUSDT not in rules — should work without rounding
+        signal = strategy.build_signal("BTCUSDT", Direction.LONG, df, None, 100.0, account)
+        # No crash = pass
+
+    def test_exchange_rules_save_and_load(self):
+        """save_exchange_rules and load_exchange_rules roundtrip."""
+        import tempfile
+        from broker.exchange_rules import save_exchange_rules, load_exchange_rules
+
+        rules = {
+            "BTCUSDT": {"qtyStep": 0.001, "minOrderQty": 0.001, "tickSize": 0.1},
+            "ETHUSDT": {"qtyStep": 0.01, "minOrderQty": 0.01, "tickSize": 0.01},
+        }
+
+        with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as f:
+            tmp_path = f.name
+
+        try:
+            save_exchange_rules(rules, tmp_path)
+            loaded = load_exchange_rules(tmp_path)
+            self.assertEqual(loaded["BTCUSDT"]["qtyStep"], 0.001)
+            self.assertEqual(loaded["ETHUSDT"]["tickSize"], 0.01)
+            self.assertEqual(len(loaded), 2)
+        finally:
+            os.unlink(tmp_path)
+
+    def test_rules_need_refresh_missing_file(self):
+        """rules_need_refresh returns True for missing file."""
+        from broker.exchange_rules import rules_need_refresh
+        self.assertTrue(rules_need_refresh("/tmp/nonexistent_rules_xyz.json"))
+
+    def test_load_exchange_rules_missing_returns_empty(self):
+        """load_exchange_rules returns {} for missing file."""
+        from broker.exchange_rules import load_exchange_rules
+        result = load_exchange_rules("/tmp/nonexistent_rules_xyz.json")
+        self.assertEqual(result, {})
+
+
+# ══════════════════════════════════════════════════════════════════
+# PORTFOLIO SELECTOR TESTS
+# ══════════════════════════════════════════════════════════════════
+
+class TestPortfolioSelector(unittest.TestCase):
+    """Tests for beta-neutral portfolio selector."""
+
+    def test_select_best_per_sector(self):
+        """select_best_per_sector picks highest PnL per sector."""
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "scripts"))
+        from scripts.portfolio_selector import select_best_per_sector
+
+        # Mock optimization results
+        rows = [
+            {"symbol": "BTCUSDT", "total_pnl": 150.0, "win_rate": 60.0, "return_pct": 7.5, "max_drawdown_pct": 5.0},
+            {"symbol": "ETHUSDT", "total_pnl": 200.0, "win_rate": 65.0, "return_pct": 10.0, "max_drawdown_pct": 4.0},
+            {"symbol": "SOLUSDT", "total_pnl": 80.0, "win_rate": 55.0, "return_pct": 4.0, "max_drawdown_pct": 8.0},
+            {"symbol": "AVAXUSDT", "total_pnl": 120.0, "win_rate": 58.0, "return_pct": 6.0, "max_drawdown_pct": 6.0},
+            {"symbol": "DOGEUSDT", "total_pnl": 50.0, "win_rate": 52.0, "return_pct": 2.5, "max_drawdown_pct": 10.0},
+            {"symbol": "LINKUSDT", "total_pnl": 90.0, "win_rate": 57.0, "return_pct": 4.5, "max_drawdown_pct": 7.0},
+        ]
+        df = pd.DataFrame(rows)
+
+        results = select_best_per_sector(df)
+
+        # Majors: ETHUSDT has higher PnL
+        self.assertEqual(results["Majors"]["symbol"], "ETHUSDT")
+        self.assertEqual(results["Majors"]["total_pnl"], 200.0)
+
+        # L1/L2: AVAXUSDT > SOLUSDT
+        self.assertEqual(results["L1/L2"]["symbol"], "AVAXUSDT")
+
+        # Memes: DOGEUSDT (only one)
+        self.assertEqual(results["Memes"]["symbol"], "DOGEUSDT")
+
+        # Infra/Oracles: LINKUSDT
+        self.assertEqual(results["Infra/Oracles"]["symbol"], "LINKUSDT")
+
+    def test_select_empty_sector(self):
+        """Sectors with no data return None."""
+        from scripts.portfolio_selector import select_best_per_sector
+
+        # Only have BTC data
+        rows = [
+            {"symbol": "BTCUSDT", "total_pnl": 100.0, "win_rate": 60.0, "return_pct": 5.0, "max_drawdown_pct": 5.0},
+        ]
+        df = pd.DataFrame(rows)
+
+        results = select_best_per_sector(df)
+        self.assertEqual(results["Majors"]["symbol"], "BTCUSDT")
+        self.assertIsNone(results["DeFi"])
+        self.assertIsNone(results["Memes"])
+
+    def test_sector_clusters_coverage(self):
+        """All sector clusters contain valid symbols ending with USDT."""
+        from scripts.portfolio_selector import SECTOR_CLUSTERS
+
+        all_symbols = []
+        for sector, symbols in SECTOR_CLUSTERS.items():
+            self.assertIsInstance(symbols, list)
+            self.assertGreater(len(symbols), 0, f"Sector {sector} is empty")
+            for s in symbols:
+                self.assertTrue(s.endswith("USDT"), f"{s} doesn't end with USDT")
+                all_symbols.append(s)
+
+        # No duplicates across sectors
+        self.assertEqual(len(all_symbols), len(set(all_symbols)), "Duplicate symbol across sectors")
+
+
+# ══════════════════════════════════════════════════════════════════
 # RUN
 # ══════════════════════════════════════════════════════════════════
 
