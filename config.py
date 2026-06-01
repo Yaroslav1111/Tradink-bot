@@ -32,17 +32,10 @@ BYBIT_DEMO_ENDPOINT: str = "https://api-demo.bybit.com"
 # ──────────────────────────────────────────────
 # Monitored symbols (linear perpetual, Bybit format)
 # ──────────────────────────────────────────────
+
 SYMBOLS: list[str] = [
-    "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT",
-    "DOGEUSDT", "ADAUSDT", "AVAXUSDT", "DOTUSDT", "LINKUSDT",
-    "MATICUSDT", "TONUSDT", "TRXUSDT", "UNIUSDT",
-    "ATOMUSDT", "LTCUSDT", "BCHUSDT", "NEARUSDT", "APTUSDT",
-    "FILUSDT", "ARBUSDT", "OPUSDT", "SUIUSDT", "HYPEUSDT",
-    "IMXUSDT", "PORTALUSDT", "WIFUSDT", "FETUSDT", "RENDERUSDT",
-    "INJUSDT", "SEIUSDT", "STXUSDT", "AAVEUSDT", "MKRUSDT",
-    "RUNEUSDT", "TIAUSDT", "ALGOUSDT", "FTMUSDT", "SANDUSDT",
-    "MANAUSDT", "GALAUSDT", "EOSUSDT", "XLMUSDT", "IOTAUSDT",
-    "BRUSDT", "COMPUSDT",
+    "BTCUSDT", "OPUSDT", "COMPUSDT", "DOGEUSDT", "GALAUSDT",
+    "FILUSDT", "STXUSDT", "BRUSDT", "MANAUSDT", "PORTALUSDT", "BSBUSDT", "NEARUSDT", "HYPEUSDT"
 ]
 
 # ──────────────────────────────────────────────
@@ -102,7 +95,7 @@ POC_WEIGHT_VS_FIBO: float = 0.6     # 60% POC + 40% Fibo blend (0=pure Fibo, 1=p
 # ──────────────────────────────────────────────
 # Component 3: Single-Entry Lock (Anti-Pyramid)
 # ──────────────────────────────────────────────
-MAX_CONCURRENT_POSITIONS: int = 5    # max simultaneous open positions
+MAX_CONCURRENT_POSITIONS: int = 12    # max simultaneous open positions
 MAX_ENTRIES_PER_CYCLE: int = 3       # don't enter more than 3 per scan
 # Rule: 1 symbol = 1 position. No averaging, no grid, no pyramiding.
 

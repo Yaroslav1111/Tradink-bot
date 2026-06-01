@@ -1,0 +1,248 @@
+{
+  "BTCUSDT": {
+    "fibo_primary": 0.786,
+    "fibo_secondary": 0.382,
+    "sl_atr_multiplier": 1.5,
+    "order_ttl_seconds": 300.0
+  },
+  "ETHUSDT": {
+    "fibo_primary": 0.786,
+    "fibo_secondary": 0.382,
+    "sl_atr_multiplier": 2.5,
+    "order_ttl_seconds": 300.0
+  },
+  "SOLUSDT": {
+    "fibo_primary": 0.786,
+    "fibo_secondary": 0.382,
+    "sl_atr_multiplier": 2.5,
+    "order_ttl_seconds": 300.0
+  },
+  "BNBUSDT": {
+    "fibo_primary": 0.786,
+    "fibo_secondary": 0.618,
+    "sl_atr_multiplier": 2.5,
+    "order_ttl_seconds": 300.0
+  },
+  "XRPUSDT": {
+    "fibo_primary": 0.5,
+    "fibo_secondary": 0.382,
+    "sl_atr_multiplier": 2.5,
+    "order_ttl_seconds": 900.0
+  },
+  "DOGEUSDT": {
+    "fibo_primary": 0.5,
+    "fibo_secondary": 0.382,
+    "sl_atr_multiplier": 1.5,
+    "order_ttl_seconds": 900.0
+  },
+  "ADAUSDT": {
+    "fibo_primary": 0.5,
+    "fibo_secondary": 0.382,
+    "sl_atr_multiplier": 2.5,
+    "order_ttl_seconds": 300.0
+  },
+  "AVAXUSDT": {
+    "fibo_primary": 0.5,
+    "fibo_secondary": 0.618,
+    "sl_atr_multiplier": 2.5,
+    "order_ttl_seconds": 900.0
+  },
+  "DOTUSDT": {
+    "fibo_primary": 0.5,
+    "fibo_secondary": 0.382,
+    "sl_atr_multiplier": 2.5,
+    "order_ttl_seconds": 300.0
+  },
+  "LINKUSDT": {
+    "fibo_primary": 0.5,
+    "fibo_secondary": 0.382,
+    "sl_atr_multiplier": 2.5,
+    "order_ttl_seconds": 600.0
+  },
+  "TONUSDT": {
+    "fibo_primary": 0.786,
+    "fibo_secondary": 0.382,
+    "sl_atr_multiplier": 1.5,
+    "order_ttl_seconds": 300.0
+  },
+  "TRXUSDT": {
+    "fibo_primary": 0.5,
+    "fibo_secondary": 0.382,
+    "sl_atr_multiplier": 2.5,
+    "order_ttl_seconds": 300.0
+  },
+  "UNIUSDT": {
+    "fibo_primary": 0.5,
+    "fibo_secondary": 0.618,
+    "sl_atr_multiplier": 2.5,
+    "order_ttl_seconds": 300.0
+  },
+  "ATOMUSDT": {
+    "fibo_primary": 0.786,
+    "fibo_secondary": 0.382,
+    "sl_atr_multiplier": 2.5,
+    "order_ttl_seconds": 300.0
+  },
+  "LTCUSDT": {
+    "fibo_primary": 0.5,
+    "fibo_secondary": 0.382,
+    "sl_atr_multiplier": 1.5,
+    "order_ttl_seconds": 300.0
+  },
+  "BCHUSDT": {
+    "fibo_primary": 0.5,
+    "fibo_secondary": 0.382,
+    "sl_atr_multiplier": 1.5,
+    "order_ttl_seconds": 600.0
+  },
+  "NEARUSDT": {
+    "fibo_primary": 0.5,
+    "fibo_secondary": 0.382,
+    "sl_atr_multiplier": 2.5,
+    "order_ttl_seconds": 900.0
+  },
+  "APTUSDT": {
+    "fibo_primary": 0.5,
+    "fibo_secondary": 0.618,
+    "sl_atr_multiplier": 1.5,
+    "order_ttl_seconds": 900.0
+  },
+  "FILUSDT": {
+    "fibo_primary": 0.5,
+    "fibo_secondary": 0.382,
+    "sl_atr_multiplier": 1.5,
+    "order_ttl_seconds": 900.0
+  },
+  "ARBUSDT": {
+    "fibo_primary": 0.786,
+    "fibo_secondary": 0.382,
+    "sl_atr_multiplier": 2.5,
+    "order_ttl_seconds": 300.0
+  },
+  "OPUSDT": {
+    "fibo_primary": 0.618,
+    "fibo_secondary": 0.382,
+    "sl_atr_multiplier": 1.5,
+    "order_ttl_seconds": 900.0
+  },
+  "SUIUSDT": {
+    "fibo_primary": 0.618,
+    "fibo_secondary": 0.5,
+    "sl_atr_multiplier": 2.5,
+    "order_ttl_seconds": 900.0
+  },
+  "HYPEUSDT": {
+    "fibo_primary": 0.5,
+    "fibo_secondary": 0.382,
+    "sl_atr_multiplier": 2.5,
+    "order_ttl_seconds": 300.0
+  },
+  "IMXUSDT": {
+    "fibo_primary": 0.5,
+    "fibo_secondary": 0.382,
+    "sl_atr_multiplier": 1.5,
+    "order_ttl_seconds": 300.0
+  },
+  "PORTALUSDT": {
+    "fibo_primary": 0.5,
+    "fibo_secondary": 0.382,
+    "sl_atr_multiplier": 2.5,
+    "order_ttl_seconds": 900.0
+  },
+  "WIFUSDT": {
+    "fibo_primary": 0.786,
+    "fibo_secondary": 0.618,
+    "sl_atr_multiplier": 2.5,
+    "order_ttl_seconds": 300.0
+  },
+  "RENDERUSDT": {
+    "fibo_primary": 0.5,
+    "fibo_secondary": 0.382,
+    "sl_atr_multiplier": 2.5,
+    "order_ttl_seconds": 600.0
+  },
+  "INJUSDT": {
+    "fibo_primary": 0.5,
+    "fibo_secondary": 0.382,
+    "sl_atr_multiplier": 2.5,
+    "order_ttl_seconds": 300.0
+  },
+  "SEIUSDT": {
+    "fibo_primary": 0.5,
+    "fibo_secondary": 0.618,
+    "sl_atr_multiplier": 2.5,
+    "order_ttl_seconds": 900.0
+  },
+  "STXUSDT": {
+    "fibo_primary": 0.786,
+    "fibo_secondary": 0.618,
+    "sl_atr_multiplier": 1.5,
+    "order_ttl_seconds": 300.0
+  },
+  "AAVEUSDT": {
+    "fibo_primary": 0.5,
+    "fibo_secondary": 0.382,
+    "sl_atr_multiplier": 1.5,
+    "order_ttl_seconds": 600.0
+  },
+  "RUNEUSDT": {
+    "fibo_primary": 0.5,
+    "fibo_secondary": 0.382,
+    "sl_atr_multiplier": 2.5,
+    "order_ttl_seconds": 900.0
+  },
+  "TIAUSDT": {
+    "fibo_primary": 0.5,
+    "fibo_secondary": 0.382,
+    "sl_atr_multiplier": 1.5,
+    "order_ttl_seconds": 600.0
+  },
+  "ALGOUSDT": {
+    "fibo_primary": 0.786,
+    "fibo_secondary": 0.382,
+    "sl_atr_multiplier": 2.5,
+    "order_ttl_seconds": 900.0
+  },
+  "SANDUSDT": {
+    "fibo_primary": 0.5,
+    "fibo_secondary": 0.618,
+    "sl_atr_multiplier": 1.5,
+    "order_ttl_seconds": 300.0
+  },
+  "MANAUSDT": {
+    "fibo_primary": 0.5,
+    "fibo_secondary": 0.5,
+    "sl_atr_multiplier": 1.5,
+    "order_ttl_seconds": 600.0
+  },
+  "GALAUSDT": {
+    "fibo_primary": 0.5,
+    "fibo_secondary": 0.5,
+    "sl_atr_multiplier": 2.5,
+    "order_ttl_seconds": 300.0
+  },
+  "XLMUSDT": {
+    "fibo_primary": 0.5,
+    "fibo_secondary": 0.618,
+    "sl_atr_multiplier": 2.5,
+    "order_ttl_seconds": 900.0
+  },
+  "IOTAUSDT": {
+    "fibo_primary": 0.5,
+    "fibo_secondary": 0.382,
+    "sl_atr_multiplier": 2.5,
+    "order_ttl_seconds": 300.0
+  },
+  "BRUSDT": {
+    "fibo_primary": 0.5,
+    "fibo_secondary": 0.5,
+    "sl_atr_multiplier": 1.5,
+    "order_ttl_seconds": 300.0
+  },
+  "COMPUSDT": {
+    "fibo_primary": 0.786,
+    "fibo_secondary": 0.618,
+    "sl_atr_multiplier": 1.5,
+    "order_ttl_seconds": 900.0
+  }
+}
