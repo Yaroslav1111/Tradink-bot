@@ -644,6 +644,8 @@ class FiboReversalStrategy:
                     shadow_sl = prev_candle_low - cushion
                 else:
                     shadow_sl = pos.highest_price * (1 - self.cfg.trailing_distance_pct)
+                # Cap shadow_sl so it never exceeds current_price (0.1% buffer)
+                shadow_sl = min(shadow_sl, current_price * 0.999)
                 if shadow_sl > pos.stop_loss:
                     pos.stop_loss = shadow_sl
             else:
@@ -651,6 +653,8 @@ class FiboReversalStrategy:
                     shadow_sl = prev_candle_high + cushion
                 else:
                     shadow_sl = pos.lowest_price * (1 + self.cfg.trailing_distance_pct)
+                # Floor shadow_sl so it never goes below current_price (0.1% buffer)
+                shadow_sl = max(shadow_sl, current_price * 1.001)
                 if shadow_sl < pos.stop_loss:
                     pos.stop_loss = shadow_sl
 

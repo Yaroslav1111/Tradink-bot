@@ -1,248 +1,289 @@
 {
   "BTCUSDT": {
-    "fibo_primary": 0.786,
-    "fibo_secondary": 0.382,
+    "rsi_oversold": 18.0,
+    "poc_weight": 0.3,
+    "fibo_primary": 0.5,
     "sl_atr_multiplier": 1.5,
-    "order_ttl_seconds": 300.0
+    "rsi_overbought": 82.0
   },
   "ETHUSDT": {
-    "fibo_primary": 0.786,
-    "fibo_secondary": 0.382,
-    "sl_atr_multiplier": 2.5,
-    "order_ttl_seconds": 300.0
-  },
-  "SOLUSDT": {
-    "fibo_primary": 0.786,
-    "fibo_secondary": 0.382,
-    "sl_atr_multiplier": 2.5,
-    "order_ttl_seconds": 300.0
-  },
-  "BNBUSDT": {
-    "fibo_primary": 0.786,
-    "fibo_secondary": 0.618,
-    "sl_atr_multiplier": 2.5,
-    "order_ttl_seconds": 300.0
-  },
-  "XRPUSDT": {
+    "rsi_oversold": 12.0,
+    "poc_weight": 0.3,
     "fibo_primary": 0.5,
-    "fibo_secondary": 0.382,
-    "sl_atr_multiplier": 2.5,
-    "order_ttl_seconds": 900.0
-  },
-  "DOGEUSDT": {
-    "fibo_primary": 0.5,
-    "fibo_secondary": 0.382,
-    "sl_atr_multiplier": 1.5,
-    "order_ttl_seconds": 900.0
-  },
-  "ADAUSDT": {
-    "fibo_primary": 0.5,
-    "fibo_secondary": 0.382,
-    "sl_atr_multiplier": 2.5,
-    "order_ttl_seconds": 300.0
-  },
-  "AVAXUSDT": {
-    "fibo_primary": 0.5,
-    "fibo_secondary": 0.618,
-    "sl_atr_multiplier": 2.5,
-    "order_ttl_seconds": 900.0
-  },
-  "DOTUSDT": {
-    "fibo_primary": 0.5,
-    "fibo_secondary": 0.382,
-    "sl_atr_multiplier": 2.5,
-    "order_ttl_seconds": 300.0
-  },
-  "LINKUSDT": {
-    "fibo_primary": 0.5,
-    "fibo_secondary": 0.382,
-    "sl_atr_multiplier": 2.5,
-    "order_ttl_seconds": 600.0
-  },
-  "TONUSDT": {
-    "fibo_primary": 0.786,
-    "fibo_secondary": 0.382,
-    "sl_atr_multiplier": 1.5,
-    "order_ttl_seconds": 300.0
-  },
-  "TRXUSDT": {
-    "fibo_primary": 0.5,
-    "fibo_secondary": 0.382,
-    "sl_atr_multiplier": 2.5,
-    "order_ttl_seconds": 300.0
-  },
-  "UNIUSDT": {
-    "fibo_primary": 0.5,
-    "fibo_secondary": 0.618,
-    "sl_atr_multiplier": 2.5,
-    "order_ttl_seconds": 300.0
-  },
-  "ATOMUSDT": {
-    "fibo_primary": 0.786,
-    "fibo_secondary": 0.382,
-    "sl_atr_multiplier": 2.5,
-    "order_ttl_seconds": 300.0
-  },
-  "LTCUSDT": {
-    "fibo_primary": 0.5,
-    "fibo_secondary": 0.382,
-    "sl_atr_multiplier": 1.5,
-    "order_ttl_seconds": 300.0
-  },
-  "BCHUSDT": {
-    "fibo_primary": 0.5,
-    "fibo_secondary": 0.382,
-    "sl_atr_multiplier": 1.5,
-    "order_ttl_seconds": 600.0
-  },
-  "NEARUSDT": {
-    "fibo_primary": 0.5,
-    "fibo_secondary": 0.382,
-    "sl_atr_multiplier": 2.5,
-    "order_ttl_seconds": 900.0
-  },
-  "APTUSDT": {
-    "fibo_primary": 0.5,
-    "fibo_secondary": 0.618,
-    "sl_atr_multiplier": 1.5,
-    "order_ttl_seconds": 900.0
-  },
-  "FILUSDT": {
-    "fibo_primary": 0.5,
-    "fibo_secondary": 0.382,
-    "sl_atr_multiplier": 1.5,
-    "order_ttl_seconds": 900.0
-  },
-  "ARBUSDT": {
-    "fibo_primary": 0.786,
-    "fibo_secondary": 0.382,
-    "sl_atr_multiplier": 2.5,
-    "order_ttl_seconds": 300.0
-  },
-  "OPUSDT": {
-    "fibo_primary": 0.618,
-    "fibo_secondary": 0.382,
-    "sl_atr_multiplier": 1.5,
-    "order_ttl_seconds": 900.0
-  },
-  "SUIUSDT": {
-    "fibo_primary": 0.618,
-    "fibo_secondary": 0.5,
-    "sl_atr_multiplier": 2.5,
-    "order_ttl_seconds": 900.0
+    "sl_atr_multiplier": 3.5,
+    "rsi_overbought": 88.0
   },
   "HYPEUSDT": {
+    "rsi_oversold": 25.0,
+    "poc_weight": 0.3,
     "fibo_primary": 0.5,
-    "fibo_secondary": 0.382,
-    "sl_atr_multiplier": 2.5,
-    "order_ttl_seconds": 300.0
-  },
-  "IMXUSDT": {
-    "fibo_primary": 0.5,
-    "fibo_secondary": 0.382,
     "sl_atr_multiplier": 1.5,
-    "order_ttl_seconds": 300.0
+    "rsi_overbought": 75.0
   },
-  "PORTALUSDT": {
-    "fibo_primary": 0.5,
-    "fibo_secondary": 0.382,
-    "sl_atr_multiplier": 2.5,
-    "order_ttl_seconds": 900.0
+  "SOLUSDT": {
+    "rsi_oversold": 12.0,
+    "poc_weight": 0.3,
+    "fibo_primary": 0.618,
+    "sl_atr_multiplier": 1.5,
+    "rsi_overbought": 88.0
   },
-  "WIFUSDT": {
+  "LABUSDT": {
+    "rsi_oversold": 25.0,
+    "poc_weight": 0.3,
     "fibo_primary": 0.786,
-    "fibo_secondary": 0.618,
-    "sl_atr_multiplier": 2.5,
-    "order_ttl_seconds": 300.0
+    "sl_atr_multiplier": 1.5,
+    "rsi_overbought": 75.0
   },
-  "RENDERUSDT": {
-    "fibo_primary": 0.5,
-    "fibo_secondary": 0.382,
-    "sl_atr_multiplier": 2.5,
-    "order_ttl_seconds": 600.0
-  },
-  "INJUSDT": {
-    "fibo_primary": 0.5,
-    "fibo_secondary": 0.382,
-    "sl_atr_multiplier": 2.5,
-    "order_ttl_seconds": 300.0
-  },
-  "SEIUSDT": {
-    "fibo_primary": 0.5,
-    "fibo_secondary": 0.618,
-    "sl_atr_multiplier": 2.5,
-    "order_ttl_seconds": 900.0
-  },
-  "STXUSDT": {
+  "HUSDT": {
+    "rsi_oversold": 18.0,
+    "poc_weight": 0.3,
     "fibo_primary": 0.786,
-    "fibo_secondary": 0.618,
-    "sl_atr_multiplier": 1.5,
-    "order_ttl_seconds": 300.0
-  },
-  "AAVEUSDT": {
-    "fibo_primary": 0.5,
-    "fibo_secondary": 0.382,
-    "sl_atr_multiplier": 1.5,
-    "order_ttl_seconds": 600.0
-  },
-  "RUNEUSDT": {
-    "fibo_primary": 0.5,
-    "fibo_secondary": 0.382,
-    "sl_atr_multiplier": 2.5,
-    "order_ttl_seconds": 900.0
-  },
-  "TIAUSDT": {
-    "fibo_primary": 0.5,
-    "fibo_secondary": 0.382,
-    "sl_atr_multiplier": 1.5,
-    "order_ttl_seconds": 600.0
-  },
-  "ALGOUSDT": {
-    "fibo_primary": 0.786,
-    "fibo_secondary": 0.382,
-    "sl_atr_multiplier": 2.5,
-    "order_ttl_seconds": 900.0
-  },
-  "SANDUSDT": {
-    "fibo_primary": 0.5,
-    "fibo_secondary": 0.618,
-    "sl_atr_multiplier": 1.5,
-    "order_ttl_seconds": 300.0
-  },
-  "MANAUSDT": {
-    "fibo_primary": 0.5,
-    "fibo_secondary": 0.5,
-    "sl_atr_multiplier": 1.5,
-    "order_ttl_seconds": 600.0
-  },
-  "GALAUSDT": {
-    "fibo_primary": 0.5,
-    "fibo_secondary": 0.5,
-    "sl_atr_multiplier": 2.5,
-    "order_ttl_seconds": 300.0
+    "sl_atr_multiplier": 3.5,
+    "rsi_overbought": 82.0
   },
   "XLMUSDT": {
+    "rsi_oversold": 12.0,
+    "poc_weight": 0.3,
     "fibo_primary": 0.5,
-    "fibo_secondary": 0.618,
-    "sl_atr_multiplier": 2.5,
-    "order_ttl_seconds": 900.0
+    "sl_atr_multiplier": 3.5,
+    "rsi_overbought": 88.0
   },
-  "IOTAUSDT": {
+  "XRPUSDT": {
+    "rsi_oversold": 18.0,
+    "poc_weight": 0.3,
     "fibo_primary": 0.5,
-    "fibo_secondary": 0.382,
-    "sl_atr_multiplier": 2.5,
-    "order_ttl_seconds": 300.0
-  },
-  "BRUSDT": {
-    "fibo_primary": 0.5,
-    "fibo_secondary": 0.5,
     "sl_atr_multiplier": 1.5,
-    "order_ttl_seconds": 300.0
+    "rsi_overbought": 82.0
   },
-  "COMPUSDT": {
+  "ZECUSDT": {
+    "rsi_oversold": 12.0,
+    "poc_weight": 0.3,
+    "fibo_primary": 0.5,
+    "sl_atr_multiplier": 1.5,
+    "rsi_overbought": 88.0
+  },
+  "BNBUSDT": {
+    "rsi_oversold": 25.0,
+    "poc_weight": 0.3,
+    "fibo_primary": 0.5,
+    "sl_atr_multiplier": 2.5,
+    "rsi_overbought": 75.0
+  },
+  "NEARUSDT": {
+    "rsi_oversold": 18.0,
+    "poc_weight": 0.3,
     "fibo_primary": 0.786,
-    "fibo_secondary": 0.618,
     "sl_atr_multiplier": 1.5,
-    "order_ttl_seconds": 900.0
+    "rsi_overbought": 82.0
+  },
+  "TONUSDT": {
+    "rsi_oversold": 12.0,
+    "poc_weight": 0.3,
+    "fibo_primary": 0.5,
+    "sl_atr_multiplier": 3.5,
+    "rsi_overbought": 88.0
+  },
+  "PORTALUSDT": {
+    "rsi_oversold": 12.0,
+    "poc_weight": 0.3,
+    "fibo_primary": 0.5,
+    "sl_atr_multiplier": 3.5,
+    "rsi_overbought": 88.0
+  },
+  "WLDUSDT": {
+    "rsi_oversold": 18.0,
+    "poc_weight": 0.3,
+    "fibo_primary": 0.5,
+    "sl_atr_multiplier": 1.5,
+    "rsi_overbought": 82.0
+  },
+  "DOGEUSDT": {
+    "rsi_oversold": 12.0,
+    "poc_weight": 0.3,
+    "fibo_primary": 0.5,
+    "sl_atr_multiplier": 1.5,
+    "rsi_overbought": 88.0
+  },
+  "SUIUSDT": {
+    "rsi_oversold": 12.0,
+    "poc_weight": 0.3,
+    "fibo_primary": 0.618,
+    "sl_atr_multiplier": 3.5,
+    "rsi_overbought": 88.0
+  },
+  "ONDOUSDT": {
+    "rsi_oversold": 12.0,
+    "poc_weight": 0.3,
+    "fibo_primary": 0.786,
+    "sl_atr_multiplier": 3.5,
+    "rsi_overbought": 88.0
+  },
+  "ADAUSDT": {
+    "rsi_oversold": 12.0,
+    "poc_weight": 0.3,
+    "fibo_primary": 0.786,
+    "sl_atr_multiplier": 1.5,
+    "rsi_overbought": 88.0
+  },
+  "HOMEUSDT": {
+    "rsi_oversold": 12.0,
+    "poc_weight": 0.3,
+    "fibo_primary": 0.5,
+    "sl_atr_multiplier": 1.5,
+    "rsi_overbought": 88.0
+  },
+  "STGUSDT": {
+    "rsi_oversold": 12.0,
+    "poc_weight": 0.3,
+    "fibo_primary": 0.786,
+    "sl_atr_multiplier": 3.5,
+    "rsi_overbought": 88.0
+  },
+  "ALLOUSDT": {
+    "rsi_oversold": 12.0,
+    "poc_weight": 0.3,
+    "fibo_primary": 0.5,
+    "sl_atr_multiplier": 3.5,
+    "rsi_overbought": 88.0
+  },
+  "1000PEPEUSDT": {
+    "rsi_oversold": 12.0,
+    "poc_weight": 0.3,
+    "fibo_primary": 0.5,
+    "sl_atr_multiplier": 3.5,
+    "rsi_overbought": 88.0
+  },
+  "XAUTUSDT": {
+    "rsi_oversold": 12.0,
+    "poc_weight": 0.3,
+    "fibo_primary": 0.786,
+    "sl_atr_multiplier": 1.5,
+    "rsi_overbought": 88.0
+  },
+  "FARTCOINUSDT": {
+    "rsi_oversold": 18.0,
+    "poc_weight": 0.3,
+    "fibo_primary": 0.5,
+    "sl_atr_multiplier": 1.5,
+    "rsi_overbought": 82.0
+  },
+  "CLUSDT": {
+    "rsi_oversold": 12.0,
+    "poc_weight": 0.3,
+    "fibo_primary": 0.786,
+    "sl_atr_multiplier": 3.5,
+    "rsi_overbought": 88.0
+  },
+  "INJUSDT": {
+    "rsi_oversold": 12.0,
+    "poc_weight": 0.3,
+    "fibo_primary": 0.5,
+    "sl_atr_multiplier": 1.5,
+    "rsi_overbought": 88.0
+  },
+  "LINKUSDT": {
+    "rsi_oversold": 12.0,
+    "poc_weight": 0.3,
+    "fibo_primary": 0.5,
+    "sl_atr_multiplier": 3.5,
+    "rsi_overbought": 88.0
+  },
+  "ENAUSDT": {
+    "rsi_oversold": 12.0,
+    "poc_weight": 0.3,
+    "fibo_primary": 0.786,
+    "sl_atr_multiplier": 3.5,
+    "rsi_overbought": 88.0
+  },
+  "TAOUSDT": {
+    "rsi_oversold": 18.0,
+    "poc_weight": 0.3,
+    "fibo_primary": 0.786,
+    "sl_atr_multiplier": 1.5,
+    "rsi_overbought": 82.0
+  },
+  "BCHUSDT": {
+    "rsi_oversold": 12.0,
+    "poc_weight": 0.3,
+    "fibo_primary": 0.5,
+    "sl_atr_multiplier": 1.5,
+    "rsi_overbought": 88.0
+  },
+  "EDGEUSDT": {
+    "rsi_oversold": 12.0,
+    "poc_weight": 0.3,
+    "fibo_primary": 0.618,
+    "sl_atr_multiplier": 1.5,
+    "rsi_overbought": 88.0
+  },
+  "ESPORTSUSDT": {
+    "rsi_oversold": 18.0,
+    "poc_weight": 0.3,
+    "fibo_primary": 0.5,
+    "sl_atr_multiplier": 3.5,
+    "rsi_overbought": 82.0
+  },
+  "XAGUSDT": {
+    "rsi_oversold": 12.0,
+    "poc_weight": 0.3,
+    "fibo_primary": 0.5,
+    "sl_atr_multiplier": 1.5,
+    "rsi_overbought": 88.0
+  },
+  "SKYAI1USDT": {
+    "rsi_oversold": 12.0,
+    "poc_weight": 0.3,
+    "fibo_primary": 0.786,
+    "sl_atr_multiplier": 1.5,
+    "rsi_overbought": 88.0
+  },
+  "PIEVERSEUSDT": {
+    "rsi_oversold": 25.0,
+    "poc_weight": 0.3,
+    "fibo_primary": 0.786,
+    "sl_atr_multiplier": 2.0,
+    "rsi_overbought": 75.0
+  },
+  "ICPUSDT": {
+    "rsi_oversold": 25.0,
+    "poc_weight": 0.3,
+    "fibo_primary": 0.786,
+    "sl_atr_multiplier": 1.5,
+    "rsi_overbought": 75.0
+  },
+  "RENDERUSDT": {
+    "rsi_oversold": 18.0,
+    "poc_weight": 0.3,
+    "fibo_primary": 0.5,
+    "sl_atr_multiplier": 1.5,
+    "rsi_overbought": 82.0
+  },
+  "LITUSDT": {
+    "rsi_oversold": 25.0,
+    "poc_weight": 0.3,
+    "fibo_primary": 0.786,
+    "sl_atr_multiplier": 1.5,
+    "rsi_overbought": 75.0
+  },
+  "AVAXUSDT": {
+    "rsi_oversold": 25.0,
+    "poc_weight": 0.3,
+    "fibo_primary": 0.5,
+    "sl_atr_multiplier": 2.0,
+    "rsi_overbought": 75.0
+  },
+  "LTCUSDT": {
+    "rsi_oversold": 12.0,
+    "poc_weight": 0.3,
+    "fibo_primary": 0.5,
+    "sl_atr_multiplier": 1.5,
+    "rsi_overbought": 88.0
+  },
+  "DOTUSDT": {
+    "rsi_oversold": 25.0,
+    "poc_weight": 0.3,
+    "fibo_primary": 0.5,
+    "sl_atr_multiplier": 1.5,
+    "rsi_overbought": 75.0
   }
 }
