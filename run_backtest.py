@@ -150,7 +150,36 @@ def main():
     print(f"  Profit Factor:{results['profit_factor']:.2f}")
     print(f"  Max Drawdown: {results['max_drawdown_pct']:.1f}%")
     print(f"  Time:         {results['elapsed_seconds']:.1f}s")
-    print(f"{'═'*60}\n")
+    print(f"{'═'*60}")
+
+    # ─── v5.5 Two-Winged Dual-Lot Exit Performance ───
+    if "dual_lot_trades" in results:
+        print(f"\n{'═'*60}")
+        print(f"  v5.5 TWO-WINGED DUAL-LOT EXIT PERFORMANCE")
+        print(f"{'═'*60}")
+        print(f"  Dual-Lot Trades:   {results['dual_lot_trades']}")
+        print(f"  Lot A (Maker Fix): {results['lot_a_total_pnl']:+.2f} USDT "
+              f"(win rate {results['maker_fix_win_rate']:.1f}%)")
+        print(f"  Lot B (Momentum):  {results['lot_b_total_pnl']:+.2f} USDT")
+        print(f"  Momentum Exits:    {results['momentum_exit_count']}")
+        print(f"  Race Conditions:   {results['race_conditions']} (resolved safely)")
+        print(f"  Premature Exits:   {results['premature_exits']} "
+              f"(Lot B left profit on table)")
+        print(f"  Max-Impulse Catch: {results['max_impulse_catches']} "
+              f"(Lot B near local extreme)")
+        print(f"  Capsules Written:  {results['capsules_generated']} → data/ai_analysis/")
+        print(f"{'═'*60}")
+
+        # ─── Raw Trade Capsule JSON preview ───
+        if runner.capsules:
+            from engine.trade_capsule import capsule_to_json
+            preview = runner.capsules[0]
+            print(f"\n{'─'*60}")
+            print(f"  RAW TRADE CAPSULE PREVIEW  (capsule_id={preview.capsule_id})")
+            print(f"  4 pillars: Pre-Trade | Internal Thoughts | Execution | Post-Trade")
+            print(f"{'─'*60}")
+            print(capsule_to_json(preview, indent=2))
+            print(f"{'─'*60}\n")
 
 
 if __name__ == "__main__":

@@ -89,6 +89,36 @@ class StrategyConfig:
     supertrend_multiplier: float = 3.0  # ATR multiplier for bands
     trend_confirm_bars: int = 2         # consecutive bars against to confirm invalidation
 
+    # ══════════════════════════════════════════════════════════════
+    # v5.5 — "TWO-WINGED" DUAL-LOT DYNAMIC EXIT ENGINE
+    # (These control EXIT only — entry thresholds above are untouched.)
+    # ══════════════════════════════════════════════════════════════
+    dual_lot_enabled: bool = True
+    dual_lot_split: float = 0.5              # 50/50 split A/B
+
+    # Lot A — Maker Fix: tight limit maker to cover fees + secure fractional profit.
+    # Target NET profit band after fees: +1.5% .. +2.0%.
+    maker_fix_net_target_low: float = 0.015  # +1.5% net
+    maker_fix_net_target_high: float = 0.020  # +2.0% net (upper edge of band)
+
+    # Lot B — Momentum Float: NO static TP. Close on momentum decay.
+    # RSI crossing back to the neutral 50 line validates local reversal.
+    momentum_rsi_neutral: float = 50.0
+    momentum_rsi_len: int = 14
+    momentum_decay_confirm_bars: int = 1     # bars past neutral needed to confirm decay
+    momentum_min_profit_pct: float = 0.0     # only momentum-exit once at/above this PnL
+
+    # Protection Cascade: when Lot A FILLS, snap Lot B SL to breakeven + buffer.
+    breakeven_snap_buffer: float = 0.0006    # BE + 0.06% buffer (covers fees, eliminates risk)
+
+    # Structural Invalidation Stop: tight SL behind the extreme pivot/fibo grid level
+    # that triggered the trade (replaces arbitrary ATR stop distance).
+    structural_stop_enabled: bool = True
+    structural_stop_buffer_atr: float = 0.25  # buffer beyond pivot = 0.25 × ATR (Lot A, tight)
+    # Lot B ("float") gets extra room below the structural pivot so it can
+    # survive long enough for the momentum-decay exit to be the deciding signal.
+    momentum_float_extra_atr: float = 1.25    # additional buffer for Lot B stop
+
 
 # ══════════════════════════════════════════════════════════════════
 # INDICATORS (pure math, no I/O)
@@ -666,8 +696,9 @@ class FiboReversalStrategy:
             raw = (exit_price - pos.entry_price) * pos.quantity
         else:
             raw = (pos.entry_price - exit_price) * pos.quantity
-        # Market exits (TREND_INVALIDATION, Stop Loss) use taker fee; TP uses maker fee
-        if reason in ("TREND_INVALIDATION", "Stop Loss hit"):
+        # Market exits (TREND_INVALIDATION, MOMENTUM_DECAY, Stop Loss, Market close)
+        # use taker fee; limit-maker TP exits use maker fee.
+        if reason in ("TREND_INVALIDATION", "Stop Loss hit", "MOMENTUM_DECAY", "Market close"):
             fee_rate = self.cfg.taker_fee
         else:
             fee_rate = self.cfg.maker_fee
@@ -763,3 +794,192 @@ class FiboReversalStrategy:
             if denom <= 0: return False
             progress = (pos.entry_price - current_price) / denom
         return progress >= self.cfg.maker_tp_reposition_trigger
+
+    # ══════════════════════════════════════════════════════════════
+    # v5.5 — "TWO-WINGED" DUAL-LOT DYNAMIC EXIT ENGINE (pure logic)
+    # Entry logic above is NOT touched. These methods only shape exits.
+    # ══════════════════════════════════════════════════════════════
+
+    def compute_structural_stop(
+        self, direction: Direction, pivot_level: float, atr: float,
+    ) -> float:
+        """
+        Tight structural invalidation stop placed immediately behind the
+        extreme pivot / Fibo grid level that triggered the trade.
+
+        For a LONG the pivot is the swing_low (the level being defended);
+        stop sits just below it. For a SHORT the pivot is the swing_high;
+        stop sits just above it. Replaces arbitrary ATR-multiple stops.
+        """
+        buffer = max(atr, 0.0) * self.cfg.structural_stop_buffer_atr
+        if buffer <= 0:
+            buffer = pivot_level * 0.001
+        if direction == Direction.LONG:
+            return pivot_level - buffer
+        return pivot_level + buffer
+
+    def compute_float_stop(
+        self, direction: Direction, pivot_level: float, atr: float,
+    ) -> float:
+        """
+        Lot B ("Momentum Float") stop — the structural stop plus extra ATR
+        breathing room, so the float lot is exited by momentum decay rather
+        than being prematurely stopped at the same tight level as Lot A.
+        """
+        base_buf = max(atr, 0.0) * self.cfg.structural_stop_buffer_atr
+        extra = max(atr, 0.0) * self.cfg.momentum_float_extra_atr
+        buffer = base_buf + extra
+        if buffer <= 0:
+            buffer = pivot_level * 0.002
+        if direction == Direction.LONG:
+            return pivot_level - buffer
+        return pivot_level + buffer
+
+    def compute_maker_fix_tp(
+        self, direction: Direction, entry_price: float,
+    ) -> float:
+        """
+        Lot A limit-maker target price.
+
+        We solve for a gross move that lands NET profit inside the
+        +1.5%..+2.0% band after paying maker fees on both legs. We aim at
+        the LOW edge (+1.5% net) so the maker order is as tight as possible
+        (fastest, highest fill probability) while still guaranteed positive.
+        """
+        # Round-trip maker fee (entry maker + exit maker), as a fraction of notional.
+        roundtrip_fee = 2.0 * self.cfg.maker_fee
+        gross_move = self.cfg.maker_fix_net_target_low + roundtrip_fee
+        if direction == Direction.LONG:
+            return entry_price * (1.0 + gross_move)
+        return entry_price * (1.0 - gross_move)
+
+    def maker_fix_net_pct(self, direction: Direction, entry_price: float, exit_price: float) -> float:
+        """Net profit % for Lot A after round-trip maker fees."""
+        if entry_price <= 0:
+            return 0.0
+        if direction == Direction.LONG:
+            gross = (exit_price - entry_price) / entry_price
+        else:
+            gross = (entry_price - exit_price) / entry_price
+        return gross - 2.0 * self.cfg.maker_fee
+
+    def check_momentum_decay(self, pos: Position, df: pd.DataFrame) -> bool:
+        """
+        Lot B momentum-decay exit trigger (localized recovery exhaustion).
+
+        A reversal entry begins with RSI at an extreme (e.g. deeply oversold
+        for a LONG). The recovery is only "alive" once RSI has pushed THROUGH
+        the neutral 50 line in our favour. Momentum is declared DEAD when,
+        after that recovery, RSI crosses BACK across the neutral 50 line —
+        validating a local reversal over `momentum_decay_confirm_bars` bars.
+
+          - LONG  : RSI rose past 50 (bounce worked) then falls back below 50.
+          - SHORT : RSI fell past 50 (drop worked) then rises back above 50.
+
+        This prevents a false decay signal on the very first bars, when RSI is
+        still sitting at the entry extreme.
+        """
+        need = self.cfg.momentum_rsi_len + self.cfg.momentum_decay_confirm_bars + 2
+        if df is None or len(df) < need:
+            return False
+
+        close = df["close"].astype(float)
+        rsi = Indicators.rsi(close, self.cfg.momentum_rsi_len)
+        if rsi is None:
+            return False
+
+        rsi = rsi.dropna()
+        if len(rsi) < self.cfg.momentum_decay_confirm_bars + 2:
+            return False
+
+        neutral = self.cfg.momentum_rsi_neutral
+        confirm = max(1, self.cfg.momentum_decay_confirm_bars)
+        recent = rsi.iloc[-confirm:]
+        # look back over a short window to confirm the recovery actually happened
+        window = rsi.iloc[-(confirm + 6):-confirm] if len(rsi) > confirm + 6 else rsi.iloc[:-confirm]
+        if recent.isna().any() or len(window) == 0:
+            return False
+
+        if pos.direction == Direction.LONG:
+            recovered = bool((window > neutral).any())      # bounced above 50 earlier
+            faded = bool((recent < neutral).all())          # now back below 50
+            return recovered and faded
+        else:
+            recovered = bool((window < neutral).any())       # dropped below 50 earlier
+            faded = bool((recent > neutral).all())           # now back above 50
+            return recovered and faded
+
+    def apply_breakeven_cascade(self, pos: Position) -> Position:
+        """
+        Protection Cascade — invoked the moment Lot A's limit order state
+        becomes FILLED. Snaps Lot B's stop loss to breakeven + a minor buffer,
+        eliminating residual risk on the floating lot.
+        """
+        buf = pos.entry_price * self.cfg.breakeven_snap_buffer
+        if pos.direction == Direction.LONG:
+            new_sl = pos.entry_price + buf
+            # only ratchet upward
+            if new_sl > pos.stop_loss:
+                pos.stop_loss = new_sl
+        else:
+            new_sl = pos.entry_price - buf
+            if new_sl < pos.stop_loss or pos.stop_loss <= 0:
+                pos.stop_loss = new_sl
+        if pos.phase == PositionPhase.BREATHING:
+            pos.phase = PositionPhase.BREAKEVEN
+        return pos
+
+    def update_momentum_float(
+        self,
+        pos: Position,
+        current_price: float,
+        momentum_dead: bool = False,
+        trend_invalidated: bool = False,
+    ) -> Position:
+        """
+        Lot B ("Momentum Float") manager — NO static take-profit.
+
+        Priority of exits:
+          1. Structural / breakeven stop hit  → close (protective).
+          2. Trend invalidation               → emergency market close.
+          3. Momentum decay (RSI back to 50)  → market close once in profit.
+
+        Returns the (possibly CLOSED) position.
+        """
+        if pos.phase == PositionPhase.CLOSED:
+            return pos
+
+        # Track extremes
+        if current_price > pos.highest_price:
+            pos.highest_price = current_price
+        if current_price < pos.lowest_price:
+            pos.lowest_price = current_price
+
+        if pos.entry_price > 0:
+            if pos.direction == Direction.LONG:
+                unr_pct = (current_price - pos.entry_price) / pos.entry_price
+            else:
+                unr_pct = (pos.entry_price - current_price) / pos.entry_price
+        else:
+            unr_pct = 0.0
+
+        # 1. Protective stop (structural or snapped breakeven)
+        if pos.stop_loss > 0:
+            if pos.direction == Direction.LONG and current_price <= pos.stop_loss:
+                return self._close_position(pos, pos.stop_loss, "Stop Loss hit")
+            if pos.direction == Direction.SHORT and current_price >= pos.stop_loss:
+                return self._close_position(pos, pos.stop_loss, "Stop Loss hit")
+
+        # 2. Momentum decay — PRIMARY dynamic exit for the float lot.
+        #    (Evaluated BEFORE trend invalidation: the localized recovery dying
+        #     out is Lot B's intended signal; RSI crossing back to neutral 50.)
+        if momentum_dead and unr_pct >= self.cfg.momentum_min_profit_pct:
+            return self._close_position(pos, current_price, "MOMENTUM_DECAY")
+
+        # 3. Trend invalidation — EMERGENCY backstop only. Requires a real
+        #    give-back scenario (meaningfully in profit) so it does not
+        #    hair-trigger on every mean-reversion bounce.
+        if trend_invalidated and unr_pct >= self.cfg.trailing_trigger_pct:
+            return self._close_position(pos, current_price, "TREND_INVALIDATION")
+
+        return pos

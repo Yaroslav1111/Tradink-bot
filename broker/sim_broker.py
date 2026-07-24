@@ -50,6 +50,8 @@ class SimBroker:
         self.positions: list[Position] = []
         self.pending_orders: list[Order] = []
         self.closed_trades: list[TradeResult] = []
+        # v5.5: per-lot realized-PnL registry keyed by exchange_order_id
+        self._closed_by_id: dict[str, dict] = {}
 
         # Simulated time & candle data
         self._current_time: float = 0.0
@@ -187,6 +189,7 @@ class SimBroker:
             fibo_ext_2=order.fibo_ext_2,
             entry_time=fill_time,
             exchange_order_id=order.order_id,
+            capsule_id=order.cascade_group_id,   # v5.5: link back to entry context
         )
         self.positions.append(pos)
 
@@ -238,6 +241,14 @@ class SimBroker:
             duration_seconds=close_time - pos.entry_time,
         )
         self.closed_trades.append(trade)
+        # v5.5: register realized PnL against this lot's exchange_order_id
+        if pos.exchange_order_id:
+            self._closed_by_id[pos.exchange_order_id] = {
+                "pnl": net_pnl,
+                "reason": reason,
+                "exit_price": exit_price,
+                "exit_time": close_time,
+            }
         self.positions.remove(pos)
 
         logger.debug(
@@ -359,6 +370,51 @@ class SimBroker:
                 if price <= 0:
                     return False
                 self._close_sim_position(pos, price, "Market close", self._current_time)
+                return True
+        return False
+
+    # ─── v5.5 lot-precise helpers (dual-lot "Two-Winged" engine) ───
+
+    def get_position_by_id(self, exchange_order_id: str) -> Optional[Position]:
+        """Look up an open position by the exchange_order_id it was created from."""
+        for pos in self.positions:
+            if pos.exchange_order_id == exchange_order_id:
+                return pos
+        return None
+
+    def get_filled_size(self, exchange_order_id: str) -> float:
+        """
+        Dynamic Size Sync — return the ACTUAL open size of a lot.
+        Live trading uses this before firing trailing/breakeven payloads to
+        prevent size-mismatch API rejections (e.g. Bybit ErrCode 10001)
+        during partial fills. In sim, the full quantity is always filled.
+        """
+        pos = self.get_position_by_id(exchange_order_id)
+        return pos.quantity if pos else 0.0
+
+    def close_position_by_id(
+        self, exchange_order_id: str, exit_price: float = 0.0, reason: str = "Market close",
+    ) -> bool:
+        """Close a specific lot (by its exchange_order_id) at market/given price."""
+        for pos in self.positions[:]:
+            if pos.exchange_order_id == exchange_order_id:
+                price = exit_price if exit_price > 0 else self.get_ticker_price(pos.symbol)
+                if price <= 0:
+                    return False
+                self._close_sim_position(pos, price, reason, self._current_time)
+                return True
+        return False
+
+    def update_position_sl_tp_by_id(
+        self, exchange_order_id: str, stop_loss: float = 0, take_profit: float = 0,
+    ) -> bool:
+        """Update SL/TP on a specific lot identified by exchange_order_id."""
+        for pos in self.positions:
+            if pos.exchange_order_id == exchange_order_id:
+                if stop_loss > 0:
+                    pos.stop_loss = stop_loss
+                # allow clearing TP (set to 0) for the momentum-float lot
+                pos.take_profit = take_profit
                 return True
         return False
 
@@ -491,5 +547,6 @@ class SimBroker:
         self.positions.clear()
         self.pending_orders.clear()
         self.closed_trades.clear()
+        self._closed_by_id.clear()
         self._current_time = 0.0
         self._current_bar_idx = {s: 0 for s in self._market_data}

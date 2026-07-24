@@ -19,6 +19,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from engine.models import (
     Direction, OrderStatus, PositionPhase, Candle, Signal, Order,
     Position, TradeResult, AccountState,
+    LotRole, LotState, TradeCapsule,
 )
 from engine.strategy import (
     StrategyConfig, Indicators, VolumeProfiler, FiboCalc,
@@ -1613,6 +1614,320 @@ class TestPortfolioSelector(unittest.TestCase):
 
         # No duplicates across sectors
         self.assertEqual(len(all_symbols), len(set(all_symbols)), "Duplicate symbol across sectors")
+
+
+# ══════════════════════════════════════════════════════════════════
+# TEST: v5.5 Two-Winged Dual-Lot Exit Engine
+# ══════════════════════════════════════════════════════════════════
+
+class TestDualLotExitEngine(unittest.TestCase):
+    """Test the v5.5 dual-lot dynamic exit primitives (pure strategy logic)."""
+
+    def setUp(self):
+        self.cfg = StrategyConfig()
+        self.strategy = FiboReversalStrategy(self.cfg, initial_balance=2000.0)
+
+    def test_config_has_dual_lot_params(self):
+        self.assertTrue(hasattr(self.cfg, "dual_lot_enabled"))
+        self.assertAlmostEqual(self.cfg.dual_lot_split, 0.5)
+        self.assertLess(self.cfg.maker_fix_net_target_low, self.cfg.maker_fix_net_target_high)
+        self.assertAlmostEqual(self.cfg.momentum_rsi_neutral, 50.0)
+
+    def test_maker_fix_tp_long_above_entry(self):
+        tp = self.strategy.compute_maker_fix_tp(Direction.LONG, 100.0)
+        self.assertGreater(tp, 100.0)
+
+    def test_maker_fix_tp_short_below_entry(self):
+        tp = self.strategy.compute_maker_fix_tp(Direction.SHORT, 100.0)
+        self.assertLess(tp, 100.0)
+
+    def test_maker_fix_net_profit_in_target_band(self):
+        """Lot A must net at least +1.5% after round-trip maker fees."""
+        entry = 100.0
+        tp = self.strategy.compute_maker_fix_tp(Direction.LONG, entry)
+        net = self.strategy.maker_fix_net_pct(Direction.LONG, entry, tp)
+        self.assertGreaterEqual(net, self.cfg.maker_fix_net_target_low - 1e-9)
+        self.assertLessEqual(net, self.cfg.maker_fix_net_target_high + 1e-9)
+
+    def test_structural_stop_long_below_pivot(self):
+        stop = self.strategy.compute_structural_stop(Direction.LONG, pivot_level=95.0, atr=2.0)
+        self.assertLess(stop, 95.0)
+
+    def test_structural_stop_short_above_pivot(self):
+        stop = self.strategy.compute_structural_stop(Direction.SHORT, pivot_level=105.0, atr=2.0)
+        self.assertGreater(stop, 105.0)
+
+    def test_structural_stop_tighter_than_atr_stop(self):
+        """Structural stop should be tight (buffer < 1 ATR), unlike 2xATR arbitrary stop."""
+        atr = 2.0
+        pivot = 95.0
+        stop = self.strategy.compute_structural_stop(Direction.LONG, pivot, atr)
+        # distance from pivot is only structural_stop_buffer_atr * ATR
+        self.assertAlmostEqual(pivot - stop, self.cfg.structural_stop_buffer_atr * atr, places=6)
+
+    def test_breakeven_cascade_long_snaps_above_entry(self):
+        pos = Position(
+            symbol="BTCUSDT", direction=Direction.LONG,
+            entry_price=100.0, quantity=1.0, risk_usdt=10.0,
+            stop_loss=95.0, take_profit=0.0, initial_stop_loss=95.0,
+            phase=PositionPhase.BREATHING, highest_price=100.0, lowest_price=100.0,
+            lot_role=LotRole.MOMENTUM_FLOAT,
+        )
+        pos = self.strategy.apply_breakeven_cascade(pos)
+        self.assertGreater(pos.stop_loss, 100.0)   # SL snapped above entry
+        self.assertEqual(pos.phase, PositionPhase.BREAKEVEN)
+
+    def test_breakeven_cascade_short_snaps_below_entry(self):
+        pos = Position(
+            symbol="BTCUSDT", direction=Direction.SHORT,
+            entry_price=100.0, quantity=1.0, risk_usdt=10.0,
+            stop_loss=105.0, take_profit=0.0, initial_stop_loss=105.0,
+            phase=PositionPhase.BREATHING, highest_price=100.0, lowest_price=100.0,
+            lot_role=LotRole.MOMENTUM_FLOAT,
+        )
+        pos = self.strategy.apply_breakeven_cascade(pos)
+        self.assertLess(pos.stop_loss, 100.0)
+
+    def test_momentum_float_no_static_tp(self):
+        """Lot B carries no static take-profit target."""
+        pos = Position(
+            symbol="BTCUSDT", direction=Direction.LONG,
+            entry_price=100.0, quantity=1.0, risk_usdt=10.0,
+            stop_loss=98.0, take_profit=0.0, initial_stop_loss=98.0,
+            phase=PositionPhase.BREATHING, highest_price=100.0, lowest_price=100.0,
+            lot_role=LotRole.MOMENTUM_FLOAT,
+        )
+        # price rises far — momentum float must NOT close on any TP
+        pos = self.strategy.update_momentum_float(pos, 130.0, momentum_dead=False)
+        self.assertNotEqual(pos.phase, PositionPhase.CLOSED)
+
+    def test_momentum_float_closes_on_decay(self):
+        pos = Position(
+            symbol="BTCUSDT", direction=Direction.LONG,
+            entry_price=100.0, quantity=1.0, risk_usdt=10.0,
+            stop_loss=98.0, take_profit=0.0, initial_stop_loss=98.0,
+            phase=PositionPhase.BREATHING, highest_price=105.0, lowest_price=100.0,
+            lot_role=LotRole.MOMENTUM_FLOAT,
+        )
+        pos = self.strategy.update_momentum_float(pos, 104.0, momentum_dead=True)
+        self.assertEqual(pos.phase, PositionPhase.CLOSED)
+        self.assertEqual(pos.close_reason, "MOMENTUM_DECAY")
+
+    def test_momentum_float_stop_loss(self):
+        pos = Position(
+            symbol="BTCUSDT", direction=Direction.LONG,
+            entry_price=100.0, quantity=1.0, risk_usdt=10.0,
+            stop_loss=98.0, take_profit=0.0, initial_stop_loss=98.0,
+            phase=PositionPhase.BREATHING, highest_price=100.0, lowest_price=100.0,
+            lot_role=LotRole.MOMENTUM_FLOAT,
+        )
+        pos = self.strategy.update_momentum_float(pos, 97.5, momentum_dead=False)
+        self.assertEqual(pos.phase, PositionPhase.CLOSED)
+        self.assertEqual(pos.close_reason, "Stop Loss hit")
+
+    def test_momentum_decay_no_false_signal_at_entry(self):
+        """Fresh oversold LONG entry must NOT immediately signal decay."""
+        df = make_trending_df(200, direction="down")  # RSI stays low, no recovery
+        pos = Position(
+            symbol="BTCUSDT", direction=Direction.LONG,
+            entry_price=100.0, quantity=1.0, risk_usdt=10.0,
+            stop_loss=98.0, take_profit=0.0, initial_stop_loss=98.0,
+            phase=PositionPhase.BREATHING, highest_price=100.0, lowest_price=100.0,
+        )
+        # never recovered past 50 → decay should be False
+        self.assertFalse(self.strategy.check_momentum_decay(pos, df))
+
+
+# ══════════════════════════════════════════════════════════════════
+# TEST: v5.5 Trade Capsule Subsystem
+# ══════════════════════════════════════════════════════════════════
+
+class TestTradeCapsule(unittest.TestCase):
+    """Test the LLM-ready Trade Capsule assembly + non-blocking logger."""
+
+    def setUp(self):
+        from engine.trade_capsule import CapsuleLogger
+        import tempfile
+        self.tmpdir = tempfile.mkdtemp(prefix="capsule_test_")
+        self.logger = CapsuleLogger(out_dir=self.tmpdir, async_mode=False)
+
+    def test_build_pre_trade_context(self):
+        from engine.trade_capsule import build_pre_trade
+        df = make_ohlcv_df(50)
+        ctx = build_pre_trade("BTCUSDT", Direction.LONG, df, 100.0, 1700000000.0)
+        self.assertEqual(ctx.symbol, "BTCUSDT")
+        self.assertEqual(ctx.direction, "LONG")
+        self.assertGreater(len(ctx.ohlcv), 0)
+        self.assertEqual(len(ctx.ohlcv[0]), 6)  # [ts,o,h,l,c,v]
+
+    def test_build_internal_thoughts(self):
+        from engine.trade_capsule import build_internal_thoughts
+        sig = Signal(
+            symbol="BTCUSDT", direction=Direction.LONG,
+            entry_price_50=99.0, entry_price_618=98.5, stop_loss=97.0,
+            take_profit=110.0, qty_50=1.0, qty_618=1.0,
+            risk_usdt_50=10.0, risk_usdt_618=10.0, atr=2.0,
+            fibo_ext_1=110.0, fibo_ext_2=120.0, swing_high=105.0, swing_low=95.0,
+            oscillators_firing=3, rsi_value=12.0, cci_value=-260.0, willr_value=-97.0,
+        )
+        it = build_internal_thoughts(sig, pivot_level=95.0, structural_stop=94.5)
+        self.assertEqual(it.oscillators_firing, 3)
+        self.assertAlmostEqual(it.rsi, 12.0)
+        self.assertAlmostEqual(it.pivot_level, 95.0)
+
+    def test_build_post_trade_premature_detection(self):
+        from engine.trade_capsule import build_post_trade
+        # After LONG exit at 100, market keeps running up to 110 → premature
+        rows = {
+            "timestamp": [i for i in range(15)],
+            "open": [100 + i for i in range(15)],
+            "high": [101 + i for i in range(15)],
+            "low": [99 + i for i in range(15)],
+            "close": [100.5 + i for i in range(15)],
+            "volume": [1000] * 15,
+        }
+        df_after = pd.DataFrame(rows)
+        ptr = build_post_trade(Direction.LONG, 100.0, 0.0, df_after)
+        self.assertTrue(ptr.exited_prematurely)
+        self.assertGreater(ptr.max_favorable_pct, 0.0)
+        self.assertEqual(ptr.lookahead_candles, 15)
+
+    def test_capsule_serialization_prunes_nulls(self):
+        from engine.trade_capsule import capsule_to_dict
+        cap = TradeCapsule(capsule_id="abc123", symbol="BTCUSDT", direction="LONG")
+        d = capsule_to_dict(cap)
+        self.assertEqual(d["capsule_id"], "abc123")
+        # None pillars pruned for token economy
+        self.assertNotIn("pre_trade", d)
+
+    def test_capsule_logger_writes_file(self):
+        import os
+        cap = TradeCapsule(capsule_id="wtest01", symbol="BTCUSDT", direction="LONG",
+                           total_pnl_usdt=1.23)
+        self.logger.log(cap)
+        path = os.path.join(self.tmpdir, "wtest01.json")
+        self.assertTrue(os.path.exists(path))
+        import json as _json
+        d = _json.load(open(path))
+        self.assertEqual(d["capsule_id"], "wtest01")
+        self.assertAlmostEqual(d["total_pnl_usdt"], 1.23)
+
+    def test_capsule_logger_never_raises_on_bad_dir(self):
+        """Non-blocking: logger swallows I/O errors instead of crashing."""
+        from engine.trade_capsule import CapsuleLogger
+        bad = CapsuleLogger(out_dir="/proc/nonexistent_readonly_xyz", async_mode=False)
+        cap = TradeCapsule(capsule_id="x", symbol="B", direction="LONG")
+        try:
+            bad.log(cap)  # must NOT raise
+        except Exception as e:  # pragma: no cover
+            self.fail(f"CapsuleLogger raised on bad dir: {e}")
+
+
+# ══════════════════════════════════════════════════════════════════
+# TEST: v5.5 SimBroker lot-precise helpers + race safety
+# ══════════════════════════════════════════════════════════════════
+
+class TestDualLotBrokerIntegration(unittest.TestCase):
+    """Test lot-precise broker ops + end-to-end dual-lot backtest."""
+
+    def test_sim_broker_lot_precise_helpers(self):
+        broker = SimBroker(initial_balance=10000.0)
+        df = make_ohlcv_df(200, base_price=100)
+        broker.load_data("BTCUSDT", df)
+        broker.set_time(float(df.iloc[0]["timestamp"]))
+        broker.process_bar("BTCUSDT", 0)
+        order = broker.place_limit_order(
+            "BTCUSDT", "Buy", price=float(df.iloc[0]["close"]) * 0.999,
+            quantity=1.0, stop_loss=90.0, take_profit=110.0,
+            direction=Direction.LONG,
+        )
+        self.assertIsNotNone(order)
+
+    def test_filled_size_sync_returns_actual(self):
+        """Dynamic size sync returns actual open size (prevents ErrCode 10001)."""
+        broker = SimBroker(initial_balance=10000.0)
+        df = make_ohlcv_df(200, base_price=100)
+        broker.load_data("BTCUSDT", df)
+        # create a position directly
+        pos = Position(
+            symbol="BTCUSDT", direction=Direction.LONG, entry_price=100.0,
+            quantity=2.5, risk_usdt=10.0, stop_loss=95.0, take_profit=0.0,
+            initial_stop_loss=95.0, exchange_order_id="lotA123",
+        )
+        broker.positions.append(pos)
+        self.assertAlmostEqual(broker.get_filled_size("lotA123"), 2.5)
+        self.assertEqual(broker.get_filled_size("nonexistent"), 0.0)
+
+    def test_close_and_realized_registry(self):
+        broker = SimBroker(initial_balance=10000.0)
+        df = make_ohlcv_df(200, base_price=100)
+        broker.load_data("BTCUSDT", df)
+        broker.set_time(float(df.iloc[0]["timestamp"]))
+        broker.process_bar("BTCUSDT", 5)
+        pos = Position(
+            symbol="BTCUSDT", direction=Direction.LONG, entry_price=100.0,
+            quantity=1.0, risk_usdt=10.0, stop_loss=95.0, take_profit=0.0,
+            initial_stop_loss=95.0, exchange_order_id="lotB999",
+        )
+        broker.positions.append(pos)
+        ok = broker.close_position_by_id("lotB999", exit_price=105.0, reason="MOMENTUM_DECAY")
+        self.assertTrue(ok)
+        rec = broker._closed_by_id.get("lotB999")
+        self.assertIsNotNone(rec)
+        self.assertEqual(rec["reason"], "MOMENTUM_DECAY")
+
+    def test_dual_lot_backtest_end_to_end(self):
+        """Full dual-lot backtest runs, splits lots, and produces capsules."""
+        import tempfile
+        from engine.trade_capsule import CapsuleLogger
+        np.random.seed(7)
+        n = 900
+        t = np.arange(n) * 900.0 + 1_700_000_000
+        base = 100 + np.cumsum(np.random.randn(n) * 0.8)
+        wave = 8 * np.sin(np.arange(n) / 12.0)
+        close = base + wave
+        open_ = close + np.random.randn(n) * 0.2
+        high = np.maximum(open_, close) + np.abs(np.random.randn(n) * 0.6)
+        low = np.minimum(open_, close) - np.abs(np.random.randn(n) * 0.6)
+        vol = np.random.randint(500, 9000, n).astype(float)
+        df = pd.DataFrame({"timestamp": t, "open": open_, "high": high,
+                           "low": low, "close": close, "volume": vol})
+
+        tmpdir = tempfile.mkdtemp(prefix="bt_capsule_")
+        logger = CapsuleLogger(out_dir=tmpdir, async_mode=False)
+        runner = BacktestRunner(
+            StrategyConfig(),
+            BacktestConfig(symbol="TESTUSDT", warmup_bars=100),
+            capsule_logger=logger,
+            enable_capsules=True,
+        )
+        res = runner.run(df, None)
+        # Architecture assertions
+        self.assertIn("dual_lot_trades", res)
+        self.assertIn("lot_a_total_pnl", res)
+        self.assertIn("lot_b_total_pnl", res)
+        self.assertIn("race_conditions", res)
+        self.assertGreater(res["dual_lot_trades"], 0)
+        self.assertEqual(res["capsules_generated"], len(runner.capsules))
+        # every capsule has all four pillars
+        for cap in runner.capsules:
+            self.assertIsNotNone(cap.pre_trade)
+            self.assertIsNotNone(cap.internal_thoughts)
+            self.assertIsNotNone(cap.execution_reality)
+            self.assertIsNotNone(cap.post_trade)
+
+    def test_entry_thresholds_unchanged(self):
+        """Guard: the ENTRY indicator thresholds must remain at their defaults."""
+        cfg = StrategyConfig()
+        self.assertEqual(cfg.rsi_oversold, 15.0)
+        self.assertEqual(cfg.rsi_overbought, 85.0)
+        self.assertEqual(cfg.cci_oversold, -250.0)
+        self.assertEqual(cfg.cci_overbought, 250.0)
+        self.assertEqual(cfg.willr_oversold, -95.0)
+        self.assertEqual(cfg.willr_overbought, -5.0)
+        self.assertEqual(cfg.min_oscillators, 2)
+        self.assertEqual(cfg.fibo_primary, 0.618)
+        self.assertEqual(cfg.fibo_secondary, 0.50)
 
 
 # ══════════════════════════════════════════════════════════════════
